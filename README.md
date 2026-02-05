@@ -47,7 +47,11 @@ This builds the container image, pushes to `quay.signal9.gg/aaustin/snat-test-da
 ### 2. Create Test Infrastructure
 
 ```bash
+# Create test VMs only
 ./setup-test-infra.sh
+
+# Create test VMs AND auto-test networks (1-150)
+./setup-test-infra.sh --with-auto-test-networks
 ```
 
 Creates the following in each availability zone (az1, az2, az3):
@@ -57,6 +61,11 @@ Creates the following in each availability zone (az1, az2, az3):
 - FIP test VM (`test-fip-{az}`) with floating IP
 
 All VMs include the heartbeat agent that reports to the dashboard every 60 seconds.
+
+With `--with-auto-test-networks`, also creates 150 network sets for load testing:
+- External network (`auto-test-{n}`) with VLAN provider and EVPN
+- Private network (`auto-test-{n}-private`) with 10.100.0.0/24 subnet
+- Router connecting private to external network
 
 ### 3. Run Load Tests
 
@@ -79,18 +88,51 @@ Each iteration:
 ### 4. Cleanup
 
 ```bash
+# Cleanup test VMs only
 ./cleanup-test-infra.sh
+
+# Cleanup test VMs AND auto-test networks
+./cleanup-test-infra.sh --with-auto-test-networks
 ```
 
 ## Test Infrastructure Details
 
-### Networks
+### Test Networks (per AZ)
 
 | Resource | Name Pattern | Configuration |
 |----------|--------------|---------------|
 | Network | `test-net-{az}` | AZ-specific, Geneve |
 | Subnet | `test-subnet-{az}` | 10.0.0.0/24, DNS: 172.18.42.10 |
 | Router | `test-router-{az}` | Gateway: evpn-external |
+
+### Auto-Test Networks (1-150)
+
+Created with `--with-auto-test-networks` flag:
+
+**Address Scope and Subnet Pool:**
+
+| Resource | Name | Configuration |
+|----------|------|---------------|
+| Address Scope | `evpn-100` | IPv4 |
+| Subnet Pool | `evpn-100` | 10.42.0.0/16, default /28 prefix |
+
+**Networks (per auto-test-{n}):**
+
+| Resource | Name Pattern | Configuration |
+|----------|--------------|---------------|
+| External Network | `auto-test-{n}` | VLAN provider, MTU 1500, bgp-physnet |
+| External Subnet | `auto-test-{n}-subnet` | From evpn-100 subnet pool |
+| Router | `auto-test-{n}` | Gateway: auto-test-{n} |
+| Private Network | `auto-test-{n}-private` | Geneve |
+| Private Subnet | `auto-test-{n}-private-v4` | 10.100.0.0/24 |
+
+EVPN configuration is applied to each external network:
+- Type: L3
+- VNI: 100
+
+**Requirements for auto-test networks:**
+- `oc` CLI access to OpenShift cluster running OVN
+- Access to `ovn-northd-0` pod for EVPN configuration
 
 ### Instances
 
