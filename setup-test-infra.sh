@@ -162,6 +162,7 @@ create_auto_test_networks() {
         openstack subnet create \
             --network "auto-test-$i-private" \
             --subnet-range "$AUTO_TEST_PRIVATE_CIDR" \
+            --dns-nameserver "$DNS_NAMESERVER" \
             "auto-test-$i-private-v4"
 
         # Attach private subnet to router

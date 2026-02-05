@@ -15,12 +15,18 @@ IMAGE="fedora-43"
 FLAVOR="minimal"
 KEYPAIR="aaustin-key"
 DASHBOARD_URL="https://snat-heartbeat.apps.lab-hub.lab.signal9.gg/api/instances"
+USERDATA_FILE="./agent/cloud-init-userdata.yaml"
 NUM_NETWORKS=10
 WAIT_TIME=300  # 5 minutes
-PING_RETRIES=5
-PING_RETRY_DELAY=10
+EPHEMERAL_STALE_THRESHOLD=180  # 3 minutes (for validation)
 ITERATION=0
 MAX_ITERATIONS=${1:-0}  # 0 means unlimited
+
+# Verify userdata file exists
+if [[ ! -f "$USERDATA_FILE" ]]; then
+    echo "ERROR: Userdata file not found: $USERDATA_FILE"
+    exit 1
+fi
 
 # Track created resources for cleanup
 declare -a CREATED_SERVERS
@@ -122,40 +128,40 @@ validate_test_instances() {
     return 0
 }
 
-validate_fip_connectivity() {
-    local fip_addresses=("$@")
-    local max_retries=$PING_RETRIES
-    local retry_delay=$PING_RETRY_DELAY
+validate_ephemeral_instances() {
+    local expected_count=$1
+    echo "Validating ephemeral load test instances via dashboard..."
 
-    echo "Validating FIP connectivity..."
+    RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 -k "$DASHBOARD_URL?type=ephemeral&hostname_prefix=load-")
+    if [[ -z "$RESPONSE" ]]; then
+        echo "ERROR: Failed to reach dashboard"
+        return 1
+    fi
 
-    for fip in "${fip_addresses[@]}"; do
-        echo -n "  Pinging $fip... "
-        local attempt=1
-        local success=false
+    # Filter for instances from current iteration
+    LOAD_INSTANCES=$(echo "$RESPONSE" | jq "[.instances[] | select(.hostname | contains(\"-iter${ITERATION}\"))]")
+    LOAD_TOTAL=$(echo "$LOAD_INSTANCES" | jq 'length')
+    LOAD_HEALTHY=$(echo "$LOAD_INSTANCES" | jq '[.[] | select(.is_stale == false)] | length')
+    LOAD_STALE=$(echo "$LOAD_INSTANCES" | jq '[.[] | select(.is_stale == true)] | length')
 
-        while [[ $attempt -le $max_retries ]]; do
-            if ping -c 3 -W 5 "$fip" &>/dev/null; then
-                echo "OK"
-                success=true
-                break
-            else
-                if [[ $attempt -lt $max_retries ]]; then
-                    echo -n "retry $attempt/$max_retries... "
-                    sleep $retry_delay
-                fi
-                attempt=$((attempt + 1))
-            fi
-        done
+    echo "Ephemeral instances (iter${ITERATION}): $LOAD_HEALTHY healthy, $LOAD_STALE stale, $LOAD_TOTAL total (expected: $expected_count)"
 
-        if [[ "$success" != "true" ]]; then
-            echo "FAILED after $max_retries attempts"
-            echo "ERROR: Cannot ping floating IP $fip"
-            return 1
-        fi
-    done
+    # Check if all expected instances are present
+    if [[ "$LOAD_TOTAL" -lt "$expected_count" ]]; then
+        echo "ERROR: Expected $expected_count instances, found only $LOAD_TOTAL"
+        echo "Missing instances may not have sent heartbeats yet"
+        return 1
+    fi
 
-    echo "FIP connectivity validation passed"
+    # Check if all instances are healthy (not stale per 3-minute threshold)
+    if [[ "$LOAD_HEALTHY" -lt "$expected_count" ]]; then
+        echo "ERROR: Expected $expected_count healthy instances, found only $LOAD_HEALTHY"
+        echo "Stale/unhealthy ephemeral instances:"
+        echo "$LOAD_INSTANCES" | jq -r '.[] | select(.is_stale == true) | "  - \(.hostname) (last seen \(.seconds_ago)s ago)"'
+        return 1
+    fi
+
+    echo "Ephemeral instance validation passed"
     return 0
 }
 
@@ -176,9 +182,6 @@ run_iteration() {
     echo "=== Step 1: Selecting random networks ==="
     NETWORK_IDS=($(shuf -i 1-150 -n $NUM_NETWORKS | sort -n))
     echo "Selected networks: ${NETWORK_IDS[*]}"
-
-    # Track FIP addresses for ping validation
-    declare -a FIP_ADDRESSES
 
     # Step 2 & 3: Create instances and assign FIPs
     echo ""
@@ -201,6 +204,7 @@ run_iteration() {
             --flavor "$FLAVOR" \
             --key-name "$KEYPAIR" \
             --network "$PRIVATE_NET" \
+            --user-data "$USERDATA_FILE" \
             "$SNAT_NAME" -f value -c id >/dev/null; then
             echo "ERROR: Failed to create SNAT instance on $PRIVATE_NET"
             return 1
@@ -224,6 +228,7 @@ run_iteration() {
             --flavor "$FLAVOR" \
             --key-name "$KEYPAIR" \
             --port "$FIP_PORT" \
+            --user-data "$USERDATA_FILE" \
             "$FIP_NAME" -f value -c id >/dev/null; then
             echo "ERROR: Failed to create FIP instance on $PRIVATE_NET"
             return 1
@@ -246,7 +251,6 @@ run_iteration() {
         FIP_ID=$(echo "$FIP_RESULT" | jq -r '.id')
         FIP_ADDR=$(echo "$FIP_RESULT" | jq -r '.floating_ip_address')
         CREATED_FIPS+=("$FIP_ID")
-        FIP_ADDRESSES+=("$FIP_ADDR")
         echo "Assigned floating IP: $FIP_ADDR"
     done
 
@@ -279,10 +283,11 @@ run_iteration() {
         return 1
     fi
 
-    # Validate FIP connectivity
-    if ! validate_fip_connectivity "${FIP_ADDRESSES[@]}"; then
+    # Validate ephemeral load test instances via dashboard
+    EXPECTED_INSTANCES=$((NUM_NETWORKS * 2))
+    if ! validate_ephemeral_instances "$EXPECTED_INSTANCES"; then
         echo ""
-        echo "!!! TEST FAILED: FIP connectivity validation failed !!!"
+        echo "!!! TEST FAILED: Ephemeral instance validation failed !!!"
         return 1
     fi
 
@@ -306,8 +311,9 @@ echo "Configuration:"
 echo "  Networks per iteration: $NUM_NETWORKS"
 echo "  Instances per iteration: $((NUM_NETWORKS * 2))"
 echo "  Wait time: ${WAIT_TIME}s"
-echo "  Ping retries: $PING_RETRIES (with ${PING_RETRY_DELAY}s delay)"
+echo "  Ephemeral stale threshold: ${EPHEMERAL_STALE_THRESHOLD}s"
 echo "  Dashboard: $DASHBOARD_URL"
+echo "  Userdata file: $USERDATA_FILE"
 if [[ $MAX_ITERATIONS -gt 0 ]]; then
     echo "  Max iterations: $MAX_ITERATIONS"
 else

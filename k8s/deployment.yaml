@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: dashboard
-          image: quay.signal9.gg/aaustin/snat-test-dashboard@sha256:7c89461dff2128360444da9329e85ffe460857c44aa1228c2c8cfb5fa5c6ee88
+          image: quay.signal9.gg/aaustin/snat-test-dashboard@sha256:230be55dbab18d550d1805fc11a0e35a68d6dc399cfd5ff8d11da74eb43b795f
           ports:
             - containerPort: 8080
               protocol: TCP
