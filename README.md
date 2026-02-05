@@ -9,6 +9,7 @@ A comprehensive test infrastructure for validating SNAT and Floating IP connecti
 ```
 ├── setup-test-infra.sh      # Create test infrastructure (networks, routers, VMs)
 ├── cleanup-test-infra.sh    # Tear down test infrastructure
+├── cleanup-load-test-resources.sh  # Clean up leftover load test VMs/FIPs/ports
 ├── load-test.sh             # Continuous load testing script
 ├── deploy-dashboard.sh      # Build and deploy heartbeat dashboard to OpenShift
 ├── update-auto-test-dns.sh  # Update DNS on existing auto-test networks
@@ -261,12 +262,18 @@ openstack subnet show auto-test-1-private-v4 -c dns_nameservers
 
 ### Load test failures
 
-Resources are preserved on failure. To cleanup manually:
+Resources are preserved on failure for troubleshooting. To cleanup leftover load test resources:
 ```bash
+# Automated cleanup (recommended)
+./cleanup-load-test-resources.sh
+
+# Manual cleanup
 openstack server list --name 'load-*'
 openstack floating ip list | grep 'load-'
 openstack port list --name 'load-*'
 ```
+
+The cleanup script only removes `load-*` resources and will NOT touch permanent test infrastructure (`test-*`).
 
 ## Container Image
 
