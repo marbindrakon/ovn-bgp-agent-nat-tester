@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SNAT Test Heartbeat Dashboard</title>
+    <meta http-equiv="refresh" content="30">
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background-color: #1a1a2e;
+            color: #eee;
+            padding: 20px;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 20px;
+            color: #00d4ff;
+        }
+
+        .summary {
+            display: flex;
+            justify-content: center;
+            gap: 30px;
+            margin-bottom: 30px;
+        }
+
+        .summary-card {
+            background: #16213e;
+            padding: 20px 40px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        .summary-card .number {
+            font-size: 3em;
+            font-weight: bold;
+        }
+
+        .summary-card .label {
+            font-size: 0.9em;
+            color: #888;
+            text-transform: uppercase;
+        }
+
+        .summary-card.healthy .number {
+            color: #00ff88;
+        }
+
+        .summary-card.stale .number {
+            color: #ff4757;
+        }
+
+        .summary-card.total .number {
+            color: #00d4ff;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #16213e;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        th, td {
+            padding: 15px;
+            text-align: left;
+        }
+
+        th {
+            background: #0f3460;
+            color: #00d4ff;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.85em;
+        }
+
+        tr:nth-child(even) {
+            background: #1a1a3e;
+        }
+
+        tr:hover {
+            background: #252550;
+        }
+
+        tr.stale {
+            background: #3d1a1a !important;
+        }
+
+        tr.stale:hover {
+            background: #4d2020 !important;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+
+        .status-healthy {
+            background: #00ff8820;
+            color: #00ff88;
+        }
+
+        .status-stale {
+            background: #ff475720;
+            color: #ff4757;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .az-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 5px;
+            background: #0f3460;
+            color: #00d4ff;
+            font-size: 0.9em;
+        }
+
+        .vm-type {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 5px;
+            font-size: 0.9em;
+        }
+
+        .vm-type-snat {
+            background: #7c3aed20;
+            color: #a78bfa;
+        }
+
+        .vm-type-fip {
+            background: #f59e0b20;
+            color: #fbbf24;
+        }
+
+        .no-instances {
+            text-align: center;
+            padding: 50px;
+            color: #888;
+            font-size: 1.2em;
+        }
+
+        .last-updated {
+            text-align: center;
+            margin-top: 20px;
+            color: #666;
+            font-size: 0.85em;
+        }
+    </style>
+</head>
+<body>
+    <h1>SNAT Test Heartbeat Dashboard</h1>
+
+    <div class="summary">
+        <div class="summary-card total">
+            <div class="number">{{ total_count }}</div>
+            <div class="label">Total Instances</div>
+        </div>
+        <div class="summary-card healthy">
+            <div class="number">{{ healthy_count }}</div>
+            <div class="label">Healthy</div>
+        </div>
+        <div class="summary-card stale">
+            <div class="number">{{ stale_count }}</div>
+            <div class="label">Stale (&gt;5 min)</div>
+        </div>
+    </div>
+
+    {% if instances %}
+    <table>
+        <thead>
+            <tr>
+                <th>Status</th>
+                <th>Availability Zone</th>
+                <th>VM Type</th>
+                <th>Hostname</th>
+                <th>Instance ID</th>
+                <th>IP Address</th>
+                <th>Last Seen</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for instance in instances %}
+            <tr class="{{ 'stale' if instance.is_stale else '' }}">
+                <td>
+                    {% if instance.is_stale %}
+                    <span class="status-badge status-stale">STALE</span>
+                    {% else %}
+                    <span class="status-badge status-healthy">HEALTHY</span>
+                    {% endif %}
+                </td>
+                <td><span class="az-badge">{{ instance.availability_zone }}</span></td>
+                <td>
+                    <span class="vm-type vm-type-{{ instance.vm_type }}">{{ instance.vm_type | upper }}</span>
+                </td>
+                <td>{{ instance.hostname }}</td>
+                <td><code>{{ instance.instance_id[:8] }}...</code></td>
+                <td>{{ instance.ip_address }}</td>
+                <td>{{ instance.seconds_ago }}s ago</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="no-instances">
+        No instances have reported in yet. Waiting for heartbeats...
+    </div>
+    {% endif %}
+
+    <div class="last-updated">
+        Page auto-refreshes every 30 seconds
+    </div>
+</body>
+</html>

@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+.venv/
+*.egg-info/
+.eggs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+clouds.yaml
+secure.yaml
+
+# Temporary files
+*.tmp
+*.bak
+.cache/
+
+# Container build artifacts
+*.tar
+
+# Claude Code settings
+.claude/
+
+# Ansible inventory (contains infrastructure IPs)
+ansible-inventory

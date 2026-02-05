@@ -1,0 +1,18 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: snat-heartbeat-dashboard
+  namespace: snat-test
+  labels:
+    app: snat-heartbeat-dashboard
+spec:
+  host: snat-heartbeat.apps.lab-hub.lab.signal9.gg
+  to:
+    kind: Service
+    name: snat-heartbeat-dashboard
+    weight: 100
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

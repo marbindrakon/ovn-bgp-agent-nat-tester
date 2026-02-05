@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: snat-heartbeat-dashboard
+  namespace: snat-test
+  labels:
+    app: snat-heartbeat-dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: snat-heartbeat-dashboard
+  template:
+    metadata:
+      labels:
+        app: snat-heartbeat-dashboard
+    spec:
+      containers:
+        - name: dashboard
+          image: quay.signal9.gg/aaustin/snat-test-dashboard@sha256:7c89461dff2128360444da9329e85ffe460857c44aa1228c2c8cfb5fa5c6ee88
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "8080"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
