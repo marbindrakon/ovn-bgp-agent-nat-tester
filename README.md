@@ -11,6 +11,7 @@ A comprehensive test infrastructure for validating SNAT and Floating IP connecti
 ├── cleanup-test-infra.sh    # Tear down test infrastructure
 ├── load-test.sh             # Continuous load testing script
 ├── deploy-dashboard.sh      # Build and deploy heartbeat dashboard to OpenShift
+├── update-auto-test-dns.sh  # Update DNS on existing auto-test networks
 ├── web-service/             # Heartbeat dashboard web application
 │   ├── app.py               # Flask application
 │   ├── templates/           # HTML templates
@@ -64,8 +65,14 @@ All VMs include the heartbeat agent that reports to the dashboard every 60 secon
 
 With `--with-auto-test-networks`, also creates 150 network sets for load testing:
 - External network (`auto-test-{n}`) with VLAN provider and EVPN
-- Private network (`auto-test-{n}-private`) with 10.100.0.0/24 subnet
+- Private network (`auto-test-{n}-private`) with 10.100.0.0/24 subnet and DNS
 - Router connecting private to external network
+
+**Note:** If you have existing auto-test networks without DNS configured, run:
+```bash
+./update-auto-test-dns.sh
+```
+This adds DNS nameserver 172.18.42.10 to all 150 auto-test private subnets.
 
 ### 3. Run Load Tests
 
@@ -79,11 +86,12 @@ With `--with-auto-test-networks`, also creates 150 network sets for load testing
 
 Each iteration:
 1. Selects 10 random networks from auto-test-1 through auto-test-150
-2. Creates 20 instances (1 SNAT + 1 FIP per network)
+2. Creates 20 instances (1 SNAT + 1 FIP per network) with heartbeat agents
 3. Assigns floating IPs from corresponding external networks
-4. Waits 5 minutes
-5. Validates test infrastructure health and FIP connectivity
-6. Cleans up and repeats
+4. Waits 60s (boot) + 300s (heartbeat validation delay)
+5. Validates test infrastructure health via dashboard (6 permanent instances)
+6. Validates ephemeral instances via dashboard heartbeats (20 load instances)
+7. Cleans up and repeats
 
 ### 4. Cleanup
 
@@ -124,7 +132,7 @@ Created with `--with-auto-test-networks` flag:
 | External Subnet | `auto-test-{n}-subnet` | From evpn-100 subnet pool |
 | Router | `auto-test-{n}` | Gateway: auto-test-{n} |
 | Private Network | `auto-test-{n}-private` | Geneve |
-| Private Subnet | `auto-test-{n}-private-v4` | 10.100.0.0/24 |
+| Private Subnet | `auto-test-{n}-private-v4` | 10.100.0.0/24, DNS: 172.18.42.10 |
 
 EVPN configuration is applied to each external network:
 - Type: L3
@@ -148,12 +156,23 @@ EVPN configuration is applied to each external network:
 
 ## Heartbeat Dashboard
 
+### Instance Types
+
+The dashboard classifies instances by hostname pattern:
+
+| Instance Type | Hostname Pattern | Stale Threshold | Cleanup Policy |
+|---------------|------------------|-----------------|----------------|
+| Permanent | `test-*` | 5 minutes | Never removed |
+| Ephemeral | `load-*` | 3 minutes | Removed after 10 minutes |
+
 ### Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | Dashboard UI (auto-refreshes every 30s) |
 | `/api/instances` | GET | JSON API for instance data |
+| `/api/instances?type=ephemeral` | GET | Filter by instance type (permanent/ephemeral) |
+| `/api/instances?hostname_prefix=load-` | GET | Filter by hostname prefix |
 | `/heartbeat` | POST | Receive heartbeat from instance |
 | `/healthz` | GET | Kubernetes health check |
 
@@ -174,15 +193,16 @@ EVPN configuration is applied to each external network:
 The dashboard persists state to `/tmp/heartbeat-state.json`:
 - Updated on every heartbeat
 - Read on every dashboard request
-- Instances are never removed (staleness is display-only)
+- Permanent instances (`test-*`) are never removed
+- Ephemeral instances (`load-*`) are automatically removed after 10 minutes of no heartbeat
 
 ## Load Test Behavior
 
 ### Success Path
-1. Create instances on random auto-test networks
+1. Create instances on random auto-test networks with heartbeat agents
 2. Wait for boot (60s) + validation delay (300s)
-3. Validate 6 test infrastructure instances are healthy
-4. Ping all FIP instances (with up to 5 retries)
+3. Validate 6 permanent test infrastructure instances are healthy (via dashboard)
+4. Validate all 20 ephemeral load instances are sending heartbeats (via dashboard)
 5. Cleanup all load test resources
 6. Repeat
 
@@ -191,28 +211,53 @@ The dashboard persists state to `/tmp/heartbeat-state.json`:
 - Script exits with error message and resource list
 - Manual cleanup required after investigation
 
+### Expected Failure Modes
+The load test is designed to trigger OpenStack infrastructure failures:
+- **FIP connectivity failures**: VMs are ACTIVE but floating IPs are unreachable
+- **Missing heartbeats**: Indicates either slow VM initialization or infrastructure failure
+- **70-85% success rate** is normal under load-induced failures
+
 ### Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `NUM_NETWORKS` | 10 | Networks per iteration |
 | `WAIT_TIME` | 300 | Seconds before validation |
-| `PING_RETRIES` | 5 | Max ping attempts per FIP |
-| `PING_RETRY_DELAY` | 10 | Seconds between retries |
+| `EPHEMERAL_STALE_THRESHOLD` | 180 | Stale threshold for ephemeral instances (seconds) |
+| `USERDATA_FILE` | `./agent/cloud-init-userdata.yaml` | Cloud-init file for heartbeat agent |
 
 ## Troubleshooting
 
 ### Dashboard not receiving heartbeats
 
-1. Check VM console for cloud-init errors
-2. Verify heartbeat agent service: `systemctl status heartbeat-agent`
-3. Test connectivity: `curl -k https://snat-heartbeat.apps.lab-hub.lab.signal9.gg/healthz`
+1. Check VM console for cloud-init errors: `openstack console log show <vm-name>`
+2. Verify DNS configuration on subnet allows hostname resolution
+3. Test connectivity from control plane: `curl -k https://snat-heartbeat.apps.lab-hub.lab.signal9.gg/healthz`
+4. Check if VM's floating IP is reachable: `ping <floating-ip>`
 
-### FIP ping failures
+### Missing ephemeral instance heartbeats
 
-1. Verify security group allows ICMP: `openstack security group rule list default`
-2. Check instance status: `openstack server show <name>`
-3. Verify floating IP association: `openstack floating ip list`
+If some load test VMs don't appear in dashboard:
+1. Check if VMs are ACTIVE: `openstack server show <vm-name>`
+2. Test floating IP connectivity: `ping <floating-ip>`
+3. If ping fails but VM is ACTIVE: **Infrastructure failure** (expected under load)
+4. If ping works: Check cloud-init and heartbeat agent logs via SSH
+
+### Distinguishing failure types
+
+- **Initialization delay** (benign): VMs booting slowly, give more time
+- **Infrastructure failure** (expected): VMs ACTIVE but FIPs unreachable - this is what the test detects
+
+### DNS issues
+
+If VMs can't resolve the dashboard hostname:
+```bash
+# Check DNS configuration on auto-test private subnets
+openstack subnet show auto-test-1-private-v4 -c dns_nameservers
+
+# Update DNS on existing subnets
+./update-auto-test-dns.sh
+```
 
 ### Load test failures
 
