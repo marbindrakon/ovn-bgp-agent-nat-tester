@@ -94,3 +94,7 @@ The load test is designed to **trigger infrastructure failures**. These are not 
 - Container registry: `quay.signal9.gg/aaustin/snat-test-dashboard`
 - OpenShift namespace: `snat-test`
 - Image: `fedora-43`, Flavor: `minimal`, Keypair: `aaustin-key`
+
+## Troubleshooting
+
+See [CLAUDE_TROUBLESHOOTING.md](CLAUDE_TROUBLESHOOTING.md) for debugging guides covering OVN BGP agent issues, missing FIP routes, environment access, and common pitfalls.
