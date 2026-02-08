@@ -169,11 +169,20 @@ def dashboard():
     # Sort by availability zone, then by vm_type
     instance_list.sort(key=lambda x: (x['availability_zone'], x['vm_type'], x['instance_id']))
 
+    permanent = [i for i in instance_list if i['instance_type'] == 'permanent']
+    ephemeral = [i for i in instance_list if i['instance_type'] == 'ephemeral']
+
     return render_template('dashboard.html',
                           instances=instance_list,
                           total_count=len(instance_list),
                           stale_count=sum(1 for i in instance_list if i['is_stale']),
-                          healthy_count=sum(1 for i in instance_list if not i['is_stale']))
+                          healthy_count=sum(1 for i in instance_list if not i['is_stale']),
+                          perm_total=len(permanent),
+                          perm_healthy=sum(1 for i in permanent if not i['is_stale']),
+                          perm_stale=sum(1 for i in permanent if i['is_stale']),
+                          eph_total=len(ephemeral),
+                          eph_healthy=sum(1 for i in ephemeral if not i['is_stale']),
+                          eph_stale=sum(1 for i in ephemeral if i['is_stale']))
 
 
 @app.route('/api/instances')

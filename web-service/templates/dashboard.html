@@ -62,6 +62,34 @@
             color: #00d4ff;
         }
 
+        .summary-group {
+            background: #0f1a2e;
+            border-radius: 12px;
+            padding: 15px 20px;
+        }
+
+        .summary-group-label {
+            text-align: center;
+            font-size: 0.85em;
+            color: #888;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+            letter-spacing: 0.05em;
+        }
+
+        .summary-group-cards {
+            display: flex;
+            gap: 15px;
+        }
+
+        .summary-group .summary-card {
+            padding: 10px 20px;
+        }
+
+        .summary-group .summary-card .number {
+            font-size: 2em;
+        }
+
         table {
             width: 100%;
             border-collapse: collapse;
@@ -178,7 +206,44 @@
         </div>
         <div class="summary-card stale">
             <div class="number">{{ stale_count }}</div>
-            <div class="label">Stale (&gt;5 min)</div>
+            <div class="label">Stale</div>
+        </div>
+    </div>
+
+    <div class="summary">
+        <div class="summary-group">
+            <div class="summary-group-label">Permanent (test-*)</div>
+            <div class="summary-group-cards">
+                <div class="summary-card total">
+                    <div class="number">{{ perm_total }}</div>
+                    <div class="label">Total</div>
+                </div>
+                <div class="summary-card healthy">
+                    <div class="number">{{ perm_healthy }}</div>
+                    <div class="label">Healthy</div>
+                </div>
+                <div class="summary-card stale">
+                    <div class="number">{{ perm_stale }}</div>
+                    <div class="label">Stale (&gt;5 min)</div>
+                </div>
+            </div>
+        </div>
+        <div class="summary-group">
+            <div class="summary-group-label">Ephemeral (load-*)</div>
+            <div class="summary-group-cards">
+                <div class="summary-card total">
+                    <div class="number">{{ eph_total }}</div>
+                    <div class="label">Total</div>
+                </div>
+                <div class="summary-card healthy">
+                    <div class="number">{{ eph_healthy }}</div>
+                    <div class="label">Healthy</div>
+                </div>
+                <div class="summary-card stale">
+                    <div class="number">{{ eph_stale }}</div>
+                    <div class="label">Stale (&gt;3 min)</div>
+                </div>
+            </div>
         </div>
     </div>
 
