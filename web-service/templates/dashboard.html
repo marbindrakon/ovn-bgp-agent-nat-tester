@@ -190,6 +190,26 @@
             color: #666;
             font-size: 0.85em;
         }
+
+        .actions {
+            text-align: center;
+            margin-top: 15px;
+        }
+
+        .btn-clear {
+            background: #ff475730;
+            color: #ff4757;
+            border: 1px solid #ff475750;
+            padding: 8px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+
+        .btn-clear:hover {
+            background: #ff475750;
+        }
     </style>
 </head>
 <body>
@@ -291,5 +311,18 @@
     <div class="last-updated">
         Page auto-refreshes every 30 seconds
     </div>
+
+    <div class="actions">
+        <button class="btn-clear" onclick="clearState()">Clear All State</button>
+    </div>
+
+    <script>
+    function clearState() {
+        if (!confirm('Clear all heartbeat state? This cannot be undone.')) return;
+        fetch('/clear', { method: 'POST' })
+            .then(r => { if (r.ok) location.reload(); else alert('Failed to clear state'); })
+            .catch(() => alert('Failed to clear state'));
+    }
+    </script>
 </body>
 </html>

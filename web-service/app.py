@@ -185,6 +185,19 @@ def dashboard():
                           eph_stale=sum(1 for i in ephemeral if i['is_stale']))
 
 
+@app.route('/clear', methods=['POST'])
+def clear_state():
+    """Clear all heartbeat state."""
+    try:
+        if os.path.exists(STATE_FILE):
+            os.remove(STATE_FILE)
+        app.logger.info("State cleared manually")
+        return jsonify({'status': 'cleared'}), 200
+    except IOError as e:
+        app.logger.error(f"Failed to clear state file: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/instances')
 def api_instances():
     """API endpoint returning instance data as JSON.
