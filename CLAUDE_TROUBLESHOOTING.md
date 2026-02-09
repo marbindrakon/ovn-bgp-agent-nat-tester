@@ -110,3 +110,108 @@ All auto-test FIPs are allocated from `10.42.x.x/28` subnets (via the `evpn-100`
 
 ### Race conditions under load
 The OVN BGP agent can miss binding events when many FIPs are created simultaneously. This is the most common cause of "everything looks correct but the route is missing." The fix is always to re-bind the FIP.
+
+## FIP Failure Mode Classification
+
+There are three known failure modes for FIP connectivity. All present the same symptom (VM is ACTIVE, FIP is ACTIVE in API, but FIP is unreachable). They require different investigation and remediation.
+
+### Failure Mode 1: Agent missed the binding event (original race condition)
+
+**Identifying signs:**
+- No log entries at all for the FIP address in `ovn_bgp_agent` logs
+- No route in kernel table 100 for the FIP
+- OVN NB config (logical switch, NAT rules) is correct
+
+**Root cause:** Under load, the OVN BGP agent misses the `LogicalSwitchPortFIPCreateEvent`. The event fires but is not matched/processed. No errors in logs — it silently skips the FIP.
+
+**Fix:** Re-bind the FIP to force a new event:
+```bash
+openstack floating ip unset --port <fip-id>
+sleep 5
+openstack floating ip set --port <port-id> <fip-id>
+```
+
+### Failure Mode 2: FRR crash loop (bgpd down)
+
+**Identifying signs:**
+- OVN BGP agent logs show the FIP was **successfully** processed: "Adding BGP route for FIP", "Route created at table 100", "Added BGP route for FIP"
+- The reconciliation loop repeatedly reports "Route already existing" (route is in kernel)
+- `sudo podman exec frr vtysh -c 'show bgp summary'` returns: **`bgpd is not running`**
+- FRR container logs (`sudo podman logs frr`) show repeated restart attempts failing with:
+  ```
+  Can't bind zserv socket on (null): Address already in use
+  Cannot bind path /var/run/frr/bgpd.vty: Address already in use
+  rm: cannot remove '/var/run/frr/bgpd.pid': Permission denied
+  ```
+- Restarts happen every ~10 minutes, all fail with the same errors
+
+**Root cause:** FRR daemons (zebra, bgpd, staticd, bfdd) crashed or were killed without clean shutdown. Stale Unix domain sockets (`.vty` files) and PID files are left in `/var/run/frr/`. The systemd restart policy tries to bring FRR back, but the new processes can't bind to the stale sockets and immediately exit. The OVN BGP agent continues programming routes into the kernel routing table successfully, but with bgpd down, no routes are advertised via BGP to upstream routers.
+
+**Why some FIPs on the same node still work:** Routes advertised before the crash may still be held by upstream routers from the previous BGP session (graceful restart / stale route timers).
+
+**Fix:** A full `stop` + `start` cycle (not `restart`) clears the stale container state:
+```bash
+sudo systemctl stop edpm_frr
+sleep 3
+sudo systemctl start edpm_frr
+```
+Then restart the OVN BGP agent to trigger a full reconciliation against the fresh FRR instance:
+```bash
+sudo systemctl restart edpm_ovn_bgp_agent
+```
+Wait 30-60 seconds for routes to be re-advertised and heartbeat agents to report in.
+
+**Verification:**
+```bash
+sudo podman exec frr vtysh -c 'show bgp summary'
+# Should show peers with Up/Down time and prefix counts
+```
+
+### Failure Mode 3: Reconciliation deletes a valid route ("excessive route")
+
+**Identifying signs:**
+- OVN BGP agent logs show the FIP was **successfully** processed initially: "Route created at table 100"
+- Shortly after (within ~2 minutes), the reconciliation loop **deletes** the route:
+  ```
+  INFO: Remove excessive route <fip-address>
+  DEBUG: Route deleted at table 100
+  ```
+- No further log entries for the FIP after deletion — it is never re-added
+- FRR is healthy (`bgpd` is running, peers are established)
+
+**Root cause:** The agent's reconciliation loop compares kernel routes against its internal snapshot of OVN NB state. If the reconciliation pass runs before the agent's cached view fully reflects the new FIP binding, the route appears "excessive" (exists in kernel but not in the agent's view of what should exist). The agent deletes the route it just correctly programmed moments earlier. Once deleted, the FIP is never re-exposed because no new OVN event fires.
+
+**Fix:** Re-bind the FIP (same as Failure Mode 1):
+```bash
+openstack floating ip unset --port <fip-id>
+sleep 5
+openstack floating ip set --port <port-id> <fip-id>
+```
+Alternatively, restarting the OVN BGP agent triggers a full reconciliation with a fresh OVN NB snapshot, which should correctly re-expose the FIP.
+
+## Diagnosing Which Failure Mode
+
+Quick triage for a non-reporting FIP instance:
+
+1. **Get the compute node:** `openstack server show <instance> -f value -c OS-EXT-SRV-ATTR:host`
+2. **SSH to the compute node** and check FRR first:
+   ```bash
+   sudo podman exec frr vtysh -c 'show bgp summary'
+   ```
+   - If `bgpd is not running` → **Failure Mode 2**
+3. **Search the OVN BGP agent logs:**
+   ```bash
+   sudo podman logs ovn_bgp_agent 2>&1 | grep '<fip-address>'
+   ```
+   - No output at all → **Failure Mode 1** (missed event)
+   - Shows "Route created" followed by "Remove excessive route" → **Failure Mode 3** (reconciliation bug)
+   - Shows "Route created" and repeated "Route already existing" but no deletion → **Failure Mode 2** (route exists but not advertised because FRR is down)
+
+## Bulk Recovery
+
+To restart FRR and the OVN BGP agent across all compute nodes:
+```bash
+ansible -i ansible-inventory -u cloud-admin --key-file ~/oso-ssh -b -m shell \
+  -a "systemctl stop edpm_frr && sleep 3 && systemctl start edpm_frr && systemctl restart edpm_ovn_bgp_agent" all
+```
+Note: use `stop` + `start` (not `restart`) for FRR to ensure stale sockets are cleaned up.
