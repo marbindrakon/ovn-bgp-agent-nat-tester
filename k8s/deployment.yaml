@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: dashboard
-          image: quay.signal9.gg/aaustin/snat-test-dashboard@sha256:873194ec6895fd5b234e0eaefcfd23a195feea52967ea454ec20749bdf47a89c
+          image: quay.signal9.gg/aaustin/snat-test-dashboard@sha256:90fcb3496af22147ebce526a4aa89101ece8c7b37c2e8ae04f317cd5f2c50101
           ports:
             - containerPort: 8080
               protocol: TCP
@@ -26,6 +26,8 @@ spec:
               value: "8080"
             - name: STATE_FILE
               value: "/data/heartbeat-state.json"
+            - name: LOAD_TEST_STATUS_FILE
+              value: "/data/load-test-status.json"
           volumeMounts:
             - name: heartbeat-state
               mountPath: /data

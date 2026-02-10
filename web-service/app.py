@@ -20,6 +20,7 @@ EPHEMERAL_CLEANUP_THRESHOLD_SECONDS = 600  # 10 minutes
 
 # State file path
 STATE_FILE = os.environ.get('STATE_FILE', '/tmp/heartbeat-state.json')
+LOAD_TEST_STATUS_FILE = os.environ.get('LOAD_TEST_STATUS_FILE', '/tmp/load-test-status.json')
 
 
 def get_instance_type(hostname):
@@ -172,6 +173,8 @@ def dashboard():
     permanent = [i for i in instance_list if i['instance_type'] == 'permanent']
     ephemeral = [i for i in instance_list if i['instance_type'] == 'ephemeral']
 
+    lt_status = load_test_status()
+
     return render_template('dashboard.html',
                           instances=instance_list,
                           total_count=len(instance_list),
@@ -182,7 +185,8 @@ def dashboard():
                           perm_stale=sum(1 for i in permanent if i['is_stale']),
                           eph_total=len(ephemeral),
                           eph_healthy=sum(1 for i in ephemeral if not i['is_stale']),
-                          eph_stale=sum(1 for i in ephemeral if i['is_stale']))
+                          eph_stale=sum(1 for i in ephemeral if i['is_stale']),
+                          load_test=lt_status)
 
 
 @app.route('/clear', methods=['POST'])
@@ -248,6 +252,79 @@ def api_instances():
         'stale_count': sum(1 for i in instance_list if i['is_stale']),
         'healthy_count': sum(1 for i in instance_list if not i['is_stale']),
     })
+
+
+def load_test_status():
+    """Load the current load test status from file."""
+    default = {'status': 'idle', 'iteration': 0, 'max_iterations': 0,
+               'failed_vms': [], 'started_at': None, 'updated_at': None}
+    if os.path.exists(LOAD_TEST_STATUS_FILE):
+        try:
+            with open(LOAD_TEST_STATUS_FILE, 'r') as f:
+                data = json.load(f)
+                # Auto-expire: if last update was >15 minutes ago, treat as idle
+                if data.get('updated_at'):
+                    updated = datetime.fromisoformat(data['updated_at'])
+                    if (datetime.utcnow() - updated).total_seconds() > 900:
+                        return default
+                return {**default, **data}
+        except (json.JSONDecodeError, IOError):
+            pass
+    return default
+
+
+def save_test_status(data):
+    """Save load test status to file."""
+    try:
+        data['updated_at'] = datetime.utcnow().isoformat()
+        with open(LOAD_TEST_STATUS_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except IOError as e:
+        app.logger.error(f"Failed to save load test status: {e}")
+
+
+@app.route('/api/load-test/status', methods=['GET'])
+def get_load_test_status():
+    """Get the current load test status."""
+    return jsonify(load_test_status()), 200
+
+
+@app.route('/api/load-test/status', methods=['POST'])
+def update_load_test_status():
+    """Update the load test status.
+
+    Expected JSON body:
+      status: "running" | "completed" | "failed" | "idle"
+      iteration: current iteration number
+      max_iterations: total planned iterations (0 = unlimited)
+      failed_vms: list of VM names that failed (optional)
+    """
+    data = request.get_json() or {}
+    status = data.get('status')
+    if status not in ('running', 'completed', 'failed', 'idle'):
+        return jsonify({'error': 'status must be running, completed, failed, or idle'}), 400
+
+    current = load_test_status()
+
+    current['status'] = status
+    if 'iteration' in data:
+        current['iteration'] = data['iteration']
+    if 'max_iterations' in data:
+        current['max_iterations'] = data['max_iterations']
+
+    if status == 'running':
+        if not current.get('started_at'):
+            current['started_at'] = datetime.utcnow().isoformat()
+        # Clear failed VMs when a new iteration starts running
+        current['failed_vms'] = []
+    elif status == 'failed':
+        current['failed_vms'] = data.get('failed_vms', [])
+    elif status == 'idle':
+        current['started_at'] = None
+        current['failed_vms'] = []
+
+    save_test_status(current)
+    return jsonify({'status': 'ok'}), 200
 
 
 if __name__ == '__main__':

@@ -14,7 +14,8 @@ set -uo pipefail
 IMAGE="fedora-43"
 FLAVOR="minimal"
 KEYPAIR="aaustin-key"
-DASHBOARD_URL="https://snat-heartbeat.apps.lab-hub.lab.signal9.gg/api/instances"
+DASHBOARD_API_URL="https://snat-heartbeat.apps.lab-hub.lab.signal9.gg/api/instances"
+DASHBOARD_STATUS_URL="https://snat-heartbeat.apps.lab-hub.lab.signal9.gg/api/load-test/status"
 USERDATA_FILE="./agent/cloud-init-userdata.yaml"
 NUM_NETWORKS=10
 WAIT_TIME=300  # 5 minutes
@@ -27,6 +28,30 @@ if [[ ! -f "$USERDATA_FILE" ]]; then
     echo "ERROR: Userdata file not found: $USERDATA_FILE"
     exit 1
 fi
+
+report_status() {
+    local status="$1"
+    local iteration="${2:-$ITERATION}"
+    local max_iter="${3:-$MAX_ITERATIONS}"
+    shift 3 2>/dev/null || true
+    local failed_vms=("$@")
+
+    local vms_json="[]"
+    if [[ ${#failed_vms[@]} -gt 0 ]]; then
+        vms_json=$(printf '%s\n' "${failed_vms[@]}" | jq -R . | jq -s .)
+    fi
+
+    local json
+    json=$(jq -n \
+        --arg status "$status" \
+        --argjson iteration "$iteration" \
+        --argjson max_iterations "$max_iter" \
+        --argjson failed_vms "$vms_json" \
+        '{status: $status, iteration: $iteration, max_iterations: $max_iterations, failed_vms: $failed_vms}')
+
+    curl -s -k -X POST -H 'Content-Type: application/json' \
+        -d "$json" "$DASHBOARD_STATUS_URL" >/dev/null 2>&1 || true
+}
 
 # Track created resources for cleanup
 declare -a CREATED_SERVERS
@@ -92,7 +117,7 @@ cleanup_on_exit() {
 }
 
 # Cleanup on Ctrl+C (SIGINT) - always cleanup on interrupt
-trap 'CLEANUP_ON_EXIT=true; cleanup_on_exit; exit 130' INT
+trap 'report_status "idle"; CLEANUP_ON_EXIT=true; cleanup_on_exit; exit 130' INT
 
 # On normal exit, use the CLEANUP_ON_EXIT flag
 trap cleanup_on_exit EXIT
@@ -100,7 +125,7 @@ trap cleanup_on_exit EXIT
 validate_test_instances() {
     echo "Validating 6 test infrastructure instances..."
 
-    RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 -k "$DASHBOARD_URL")
+    RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 -k "$DASHBOARD_API_URL")
     if [[ -z "$RESPONSE" ]]; then
         echo "ERROR: Failed to reach dashboard"
         return 1
@@ -132,7 +157,7 @@ validate_ephemeral_instances() {
     local expected_count=$1
     echo "Validating ephemeral load test instances via dashboard..."
 
-    RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 -k "$DASHBOARD_URL?type=ephemeral&hostname_prefix=load-")
+    RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 -k "$DASHBOARD_API_URL?type=ephemeral&hostname_prefix=load-")
     if [[ -z "$RESPONSE" ]]; then
         echo "ERROR: Failed to reach dashboard"
         return 1
@@ -171,6 +196,7 @@ run_iteration() {
     echo "========================================"
     echo "Starting iteration $ITERATION at $(date)"
     echo "========================================"
+    report_status "running" "$ITERATION" "$MAX_ITERATIONS"
 
     # Reset tracking arrays
     CREATED_SERVERS=()
@@ -277,9 +303,18 @@ run_iteration() {
     echo "=== Validation ==="
 
     # Validate test infrastructure instances
+    FAILED_VMS=()
     if ! validate_test_instances; then
         echo ""
         echo "!!! TEST FAILED: Test infrastructure validation failed !!!"
+        # Collect stale test instance names
+        RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 -k "$DASHBOARD_API_URL")
+        if [[ -n "$RESPONSE" ]]; then
+            while IFS= read -r vm; do
+                [[ -n "$vm" ]] && FAILED_VMS+=("$vm")
+            done < <(echo "$RESPONSE" | jq -r '.instances[] | select(.hostname | startswith("test-")) | select(.is_stale == true) | .hostname')
+        fi
+        report_status "failed" "$ITERATION" "$MAX_ITERATIONS" "${FAILED_VMS[@]}"
         return 1
     fi
 
@@ -288,6 +323,24 @@ run_iteration() {
     if ! validate_ephemeral_instances "$EXPECTED_INSTANCES"; then
         echo ""
         echo "!!! TEST FAILED: Ephemeral instance validation failed !!!"
+        # Collect missing/stale ephemeral instance names
+        RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 -k "$DASHBOARD_API_URL?type=ephemeral&hostname_prefix=load-")
+        if [[ -n "$RESPONSE" ]]; then
+            # Stale instances
+            while IFS= read -r vm; do
+                [[ -n "$vm" ]] && FAILED_VMS+=("$vm")
+            done < <(echo "$RESPONSE" | jq -r "[.instances[] | select(.hostname | contains(\"-iter${ITERATION}\")) | select(.is_stale == true)] | .[].hostname")
+        fi
+        # Also find expected instances that never reported at all
+        for NET_ID in "${NETWORK_IDS[@]}"; do
+            for prefix in "load-snat" "load-fip"; do
+                expected_name="${prefix}-${NET_ID}-iter${ITERATION}"
+                if [[ -n "$RESPONSE" ]] && ! echo "$RESPONSE" | jq -e ".instances[] | select(.hostname == \"$expected_name\")" >/dev/null 2>&1; then
+                    FAILED_VMS+=("$expected_name (no heartbeat)")
+                fi
+            done
+        done
+        report_status "failed" "$ITERATION" "$MAX_ITERATIONS" "${FAILED_VMS[@]}"
         return 1
     fi
 
@@ -312,7 +365,8 @@ echo "  Networks per iteration: $NUM_NETWORKS"
 echo "  Instances per iteration: $((NUM_NETWORKS * 2))"
 echo "  Wait time: ${WAIT_TIME}s"
 echo "  Ephemeral stale threshold: ${EPHEMERAL_STALE_THRESHOLD}s"
-echo "  Dashboard: $DASHBOARD_URL"
+echo "  Dashboard API: $DASHBOARD_API_URL"
+echo "  Dashboard status: $DASHBOARD_STATUS_URL"
 echo "  Userdata file: $USERDATA_FILE"
 if [[ $MAX_ITERATIONS -gt 0 ]]; then
     echo "  Max iterations: $MAX_ITERATIONS"
@@ -350,6 +404,7 @@ while true; do
         echo "LOAD TEST COMPLETED: $ITERATION iterations successful"
         echo "Time: $(date)"
         echo "========================================"
+        report_status "completed" "$ITERATION" "$MAX_ITERATIONS"
         CLEANUP_ON_EXIT=true
         exit 0
     fi

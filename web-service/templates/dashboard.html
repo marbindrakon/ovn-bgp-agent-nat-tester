@@ -177,6 +177,111 @@
             color: #fbbf24;
         }
 
+        .load-test-status {
+            margin-bottom: 30px;
+            border-radius: 10px;
+            padding: 20px 30px;
+        }
+
+        .load-test-status.lt-idle {
+            background: #16213e;
+            border-left: 4px solid #555;
+        }
+
+        .load-test-status.lt-running {
+            background: #1a2a1a;
+            border-left: 4px solid #00ff88;
+        }
+
+        .load-test-status.lt-completed {
+            background: #16213e;
+            border-left: 4px solid #00d4ff;
+        }
+
+        .load-test-status.lt-failed {
+            background: #3d1a1a;
+            border-left: 4px solid #ff4757;
+        }
+
+        .lt-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+
+        .lt-header h2 {
+            font-size: 1.1em;
+            font-weight: 600;
+        }
+
+        .lt-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .lt-badge-idle {
+            background: #55555530;
+            color: #888;
+        }
+
+        .lt-badge-running {
+            background: #00ff8820;
+            color: #00ff88;
+            animation: pulse 1.5s infinite;
+        }
+
+        .lt-badge-completed {
+            background: #00d4ff20;
+            color: #00d4ff;
+        }
+
+        .lt-badge-failed {
+            background: #ff475720;
+            color: #ff4757;
+        }
+
+        .lt-details {
+            color: #aaa;
+            font-size: 0.9em;
+        }
+
+        .lt-failed-vms {
+            margin-top: 10px;
+            padding: 12px 15px;
+            background: #2a1010;
+            border-radius: 6px;
+        }
+
+        .lt-failed-vms-title {
+            color: #ff4757;
+            font-weight: 600;
+            font-size: 0.85em;
+            text-transform: uppercase;
+            margin-bottom: 6px;
+        }
+
+        .lt-failed-vms ul {
+            list-style: none;
+            padding: 0;
+        }
+
+        .lt-failed-vms li {
+            padding: 3px 0;
+            font-family: monospace;
+            color: #ff8888;
+            font-size: 0.9em;
+        }
+
+        .lt-failed-vms li::before {
+            content: "\2717  ";
+            color: #ff4757;
+        }
+
         .no-instances {
             text-align: center;
             padding: 50px;
@@ -265,6 +370,35 @@
                 </div>
             </div>
         </div>
+    </div>
+
+    <div class="load-test-status lt-{{ load_test.status }}">
+        <div class="lt-header">
+            <h2>Load Test</h2>
+            <span class="lt-badge lt-badge-{{ load_test.status }}">{{ load_test.status }}</span>
+        </div>
+        <div class="lt-details">
+            {% if load_test.status == 'idle' %}
+                No load test in progress.
+            {% elif load_test.status == 'running' %}
+                Iteration {{ load_test.iteration }}{% if load_test.max_iterations > 0 %} of {{ load_test.max_iterations }}{% endif %}
+                {% if load_test.started_at %}&mdash; started {{ load_test.started_at }}{% endif %}
+            {% elif load_test.status == 'completed' %}
+                Completed {{ load_test.iteration }} iteration{{ 's' if load_test.iteration != 1 else '' }} successfully.
+            {% elif load_test.status == 'failed' %}
+                Failed on iteration {{ load_test.iteration }}{% if load_test.max_iterations > 0 %} of {{ load_test.max_iterations }}{% endif %}.
+            {% endif %}
+        </div>
+        {% if load_test.status == 'failed' and load_test.failed_vms %}
+        <div class="lt-failed-vms">
+            <div class="lt-failed-vms-title">Failed VMs</div>
+            <ul>
+                {% for vm in load_test.failed_vms %}
+                <li>{{ vm }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
     </div>
 
     {% if instances %}
