@@ -189,6 +189,78 @@ openstack floating ip set --port <port-id> <fip-id>
 ```
 Alternatively, restarting the OVN BGP agent triggers a full reconciliation with a fresh OVN NB snapshot, which should correctly re-expose the FIP.
 
+### Failure Mode 4: Stale route from deleted FIP (asymmetric event handling)
+
+**Identifying signs:**
+- OVN BGP agent logs on the **correct** compute node show "Route already existing" every 2 minutes — everything looks healthy
+- FRR is running and advertising the route on both nodes
+- The FIP is unreachable externally, but **pings from the correct compute node via the VRF work**: `sudo ip vrf exec vrf-100 ping <fip-address>`
+- On the **gateway router**, the FIP has **two ECMP next-hops** from two different compute nodes:
+  ```bash
+  sudo vtysh -c 'show ip route vrf vrf-100 <fip-address>'
+  # Shows two * entries with different next-hops and equal weight
+  ```
+- On the **stale** compute node, the OVN BGP agent logs show the FIP was exposed via `NATMACAddedEvent` (not `LogicalSwitchPortFIPCreateEvent`) and there are **no subsequent log entries** for the FIP — no withdrawal, no reconciliation "Route already existing"
+- The FIP ID and port ID from the stale node's `NATMACAddedEvent` log entry **no longer exist** in OpenStack:
+  ```bash
+  openstack floating ip show <fip-id>   # "No FloatingIP found"
+  openstack port show <port-id>         # "No Port found"
+  ```
+- Reconciliation on the stale node reports "No excessive routes to remove" — it does not detect the orphaned route
+
+**Root cause:** Two bugs compound to create an unrecoverable stale route:
+
+**Bug 1 — Asymmetric event handling (no delete counterpart for NATMACAddedEvent):** When a FIP is created, two independent event paths can expose the route:
+1. `LogicalSwitchPortFIPCreateEvent` — watches the `Logical_Switch_Port` table for `neutron:port_fip` in external_ids
+2. `NATMACAddedEvent` — watches the `NAT` table for `external_mac` being populated
+
+When the FIP is later deleted, only `LogicalSwitchPortFIPDeleteEvent` (on the LSP table) fires to withdraw routes. There is **no corresponding `NATMACDeletedEvent`** — zero NAT delete events appear in logs across the entire agent lifetime. Routes exposed via the NAT event path are invisible to the LSP delete handler, so no withdrawal occurs.
+
+**Bug 2 — Reconciliation doesn't verify chassis binding:** The reconciliation loop checks whether a NAT entry exists in OVN NB for each kernel route, but does **not** verify that the NAT entry's `logical_port` is bound to the local chassis. When a FIP IP is recycled to a new VM on a different compute node, the OVN NB NAT entry still exists (for the new VM), so the stale compute node's reconciliation sees it and concludes the route is valid. This means **agent restarts do not fix this failure mode** — the route is re-validated on every reconciliation pass.
+
+This typically occurs under load when FIP IPs are recycled across iterations: a previous-iteration FIP is deleted, its IP is reallocated to a new VM on a different compute node, and the old compute node continues advertising the stale route. The gateway router receives EVPN type-5 advertisements from both nodes and ECMP load-balances traffic, with roughly half being blackholed at the stale node.
+
+**How to identify the stale compute node:**
+```bash
+# On the gateway router (172.18.158.123, user: almalinux)
+sudo vtysh -c 'show bgp l2vpn evpn route type prefix' | grep -A 5 '<fip-address>'
+# Look for two entries with different next-hops — the one that doesn't match
+# the correct compute node's BGP router-id is the stale source
+
+# Compute node BGP router-ids can be found with:
+sudo podman exec frr vtysh -c 'show bgp summary'  # "BGP router identifier" line
+```
+
+**Fix:** Manually delete the stale kernel route and neighbor entry on the stale compute node. Agent restarts alone will NOT fix this because the reconciliation re-validates the route against the (still-existing) NAT entry without checking chassis binding.
+```bash
+# On the stale compute node — find the VRF interface from the route
+sudo ip route show vrf vrf-100 | grep '<fip-address>'
+# Output: <fip-address> dev <vrf-interface> scope link
+
+# Delete the stale route and neighbor
+sudo ip route del <fip-address>/32 dev <vrf-interface> table 100
+sudo ip neigh del <fip-address> dev <vrf-interface>
+```
+FRR will automatically withdraw the BGP advertisement once the kernel route is removed. Wait 30-60 seconds for the gateway to converge on the single correct path.
+
+**Important:** After manually deleting the route, restart the OVN BGP agent to prevent the reconciliation from re-adding it:
+```bash
+sudo systemctl stop edpm_ovn_bgp_agent
+sudo ip route del <fip-address>/32 dev <vrf-interface> table 100
+sudo ip neigh del <fip-address> dev <vrf-interface>
+sudo systemctl start edpm_ovn_bgp_agent
+```
+Note: Due to Bug 2, the agent may re-add the route on the next reconciliation pass. If that happens, the only reliable fix is to also clean up the VRF interface and OVS port associated with the stale route, so the agent has no interface to program the route on.
+
+**Verification:**
+```bash
+# On the gateway router — should now show only ONE next-hop
+sudo vtysh -c 'show ip route vrf vrf-100 <fip-address>'
+
+# From your workstation — FIP should now be reachable
+ping <fip-address>
+```
+
 ## Diagnosing Which Failure Mode
 
 Quick triage for a non-reporting FIP instance:
@@ -206,6 +278,13 @@ Quick triage for a non-reporting FIP instance:
    - No output at all → **Failure Mode 1** (missed event)
    - Shows "Route created" followed by "Remove excessive route" → **Failure Mode 3** (reconciliation bug)
    - Shows "Route created" and repeated "Route already existing" but no deletion → **Failure Mode 2** (route exists but not advertised because FRR is down)
+4. **If everything looks correct on the hosting compute node** (route exists, FRR healthy, advertised to peer, local VRF ping works, but external ping fails):
+   ```bash
+   # Check the gateway router for duplicate routes
+   ssh -i ~/oso-ssh almalinux@172.18.158.123 \
+     "sudo vtysh -c 'show ip route vrf vrf-100 <fip-address>'"
+   ```
+   - Two ECMP next-hops → **Failure Mode 4** (stale route on another compute node)
 
 ## Bulk Recovery
 
