@@ -107,4 +107,8 @@ The load test is designed to **trigger infrastructure failures**. These are not 
 
 ## Troubleshooting
 
-See [CLAUDE_TROUBLESHOOTING.md](CLAUDE_TROUBLESHOOTING.md) for debugging guides covering OVN BGP agent issues, missing FIP routes, environment access, and common pitfalls.
+See [CLAUDE_TROUBLESHOOTING.md](CLAUDE_TROUBLESHOOTING.md) for debugging guides covering OVN BGP agent issues, missing FIP routes, five documented failure modes, and common pitfalls.
+
+## Infrastructure Access
+
+See `NODE_ACCESS.md` (gitignored) for the full BGP topology diagram, node tables with SSH access, BGP router-ids, peering IPs, and fabric switch credentials. This file contains sensitive information and must not be committed.

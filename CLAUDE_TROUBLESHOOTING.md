@@ -222,13 +222,12 @@ This typically occurs under load when FIP IPs are recycled across iterations: a 
 
 **How to identify the stale compute node:**
 ```bash
-# On the gateway router (172.18.158.123, user: almalinux)
+# On the gateway router for the VM's AZ (see NODE_ACCESS.md for IPs and SSH users)
 sudo vtysh -c 'show bgp l2vpn evpn route type prefix' | grep -A 5 '<fip-address>'
 # Look for two entries with different next-hops — the one that doesn't match
 # the correct compute node's BGP router-id is the stale source
 
-# Compute node BGP router-ids can be found with:
-sudo podman exec frr vtysh -c 'show bgp summary'  # "BGP router identifier" line
+# Map BGP router-ids to nodes using NODE_ACCESS.md
 ```
 
 **Fix:** Manually delete the stale kernel route and neighbor entry on the stale compute node. Agent restarts alone will NOT fix this because the reconciliation re-validates the route against the (still-existing) NAT entry without checking chassis binding.
@@ -261,6 +260,61 @@ sudo vtysh -c 'show ip route vrf vrf-100 <fip-address>'
 ping <fip-address>
 ```
 
+### Failure Mode 5: Stale CR-LRP route after network deletion (withdraw race)
+
+**Identifying signs:**
+- FIP is unreachable externally, but local VRF ping from the correct compute node works
+- The **stale node is a networker** (not a compute), in a different AZ from the VM
+- On the stale networker, the OVN BGP agent logs show:
+  1. `ChassisRedirectCreateEvent` exposed the IP via `_expose_ip` (not `_expose_fip`)
+  2. `ChassisRedirectDeleteEvent` matched, but NO `del_ip_route` or `Remove` log follows
+  3. `withdraw_ip` acquired the lock but released it in 0.000s (returned immediately)
+- The route's interface (`vrfXXXXXXXX-d0`) belongs to a VLAN that is **no longer iterated** in reconciliation
+- The gateway router shows the route with only one next-hop — the stale networker's BGP router-id — and the correct compute's route doesn't appear at all
+
+**Root cause:** A race condition between network deletion and router LRP deletion in OVN NB.
+
+When the load test cleans up resources, the network's logical switch is deleted from OVN NB **before** the router's `Logical_Router_Port` delete event is processed. The `ChassisRedirectDeleteEvent` handler calls `withdraw_ip()`, which calls `_get_ls_localnet_info(logical_switch_name)` to look up the bridge device. Since the logical switch is already gone, this returns `bridge_device=None`, and `withdraw_ip` returns without deleting the route.
+
+After deletion, the VlanDev object for the old network is garbage-collected from the agent's internal tracking. Reconciliation stops iterating the VLAN entirely. The kernel route, veth interface, and OVS port persist as orphans — completely invisible to the agent. FRR continues advertising the stale route indefinitely.
+
+**Why existing patches don't help:**
+- The Failure Mode 4 patch (stale routes on inactive VlanDevs) only handles VlanDevs that still exist as objects with `_setup_done=False`. Here, the VlanDev was **completely removed** — there's no object left to iterate.
+- Agent restarts don't help because the VlanDev is re-created for the old VLAN only if there are still ports/routers using it, which there aren't.
+
+**How to identify the stale node:**
+```bash
+# Check the gateway router in the SAME AZ as the VM (see NODE_ACCESS.md for SSH access)
+sudo vtysh -c 'show bgp l2vpn evpn route type prefix' | grep -A5 '<fip-address>'
+# Look for next-hop that doesn't match the correct compute node's BGP router-id
+
+# Map the stale BGP router-id to a node using NODE_ACCESS.md
+```
+
+**Fix:** Manually delete the stale kernel route, neighbor, veth interface, and OVS port on the stale node:
+```bash
+# On the stale networker node:
+sudo ip route del <fip-address>/32 dev <vrf-interface> table 100
+sudo ip neigh del <fip-address> dev <vrf-interface>
+
+# Optionally clean up the orphaned veth pair and OVS port to prevent
+# future stale routes on this interface:
+sudo ip link del <vrf-interface>  # also removes the peer ovsXXXXXXXX-d0
+sudo ovs-vsctl del-port br-bgp <ovs-interface>
+```
+Agent restart is NOT required — since the VlanDev is already gone from tracking, the agent won't re-add the route.
+
+**Verification:**
+```bash
+# On the gateway router — should now show route from correct compute
+sudo vtysh -c 'show ip route vrf vrf-100 <fip-address>'
+
+# From your workstation
+ping <fip-address>
+```
+
+**Proper fix needed:** A higher-level reconciliation pass that scans ALL kernel routes in VRF table 100 and checks if each route's output interface corresponds to a known, active VlanDev. Routes on unknown/untracked interfaces are orphaned and should be deleted along with their interfaces.
+
 ## Diagnosing Which Failure Mode
 
 Quick triage for a non-reporting FIP instance:
@@ -280,11 +334,17 @@ Quick triage for a non-reporting FIP instance:
    - Shows "Route created" and repeated "Route already existing" but no deletion → **Failure Mode 2** (route exists but not advertised because FRR is down)
 4. **If everything looks correct on the hosting compute node** (route exists, FRR healthy, advertised to peer, local VRF ping works, but external ping fails):
    ```bash
-   # Check the gateway router for duplicate routes
-   ssh -i ~/oso-ssh almalinux@172.18.158.123 \
-     "sudo vtysh -c 'show ip route vrf vrf-100 <fip-address>'"
+   # Check the gateway router for the VM's AZ (see NODE_ACCESS.md for access)
+   sudo vtysh -c 'show ip route vrf vrf-100 <fip-address>'
    ```
    - Two ECMP next-hops → **Failure Mode 4** (stale route on another compute node)
+   - Single next-hop from a **networker in a different AZ** → **Failure Mode 5** (stale CR-LRP route after network deletion)
+5. **If the stale node is a networker** and the route was exposed via `ChassisRedirectCreateEvent` / `_expose_ip` (not `_expose_fip`), check whether the network still exists:
+   ```bash
+   # Get network UUID from the agent logs (neutron:network_name field)
+   openstack network show <network-uuid>
+   ```
+   - `No Network found` → **Failure Mode 5**
 
 ## Bulk Recovery
 

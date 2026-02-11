@@ -46,3 +46,6 @@ secure.yaml
 
 # Ansible inventory (contains infrastructure IPs)
 ansible-inventory
+
+# Node access reference (contains infrastructure IPs)
+NODE_ACCESS.md
