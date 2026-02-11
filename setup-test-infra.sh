@@ -194,9 +194,11 @@ if [[ "$CREATE_AUTO_TEST_NETWORKS" == "true" ]]; then
 fi
 echo ""
 
+# Always ensure address scope and subnet pool exist (needed by load test network mode too)
+create_address_scope_and_subnet_pool
+
 # Create auto-test networks if requested
 if [[ "$CREATE_AUTO_TEST_NETWORKS" == "true" ]]; then
-    create_address_scope_and_subnet_pool
     create_auto_test_networks
 fi
 
