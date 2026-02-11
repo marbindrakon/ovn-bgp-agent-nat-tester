@@ -7,8 +7,8 @@ OpenStack SNAT/FIP test harness that validates networking connectivity across av
 ## Repository Layout
 
 - `setup-test-infra.sh` / `cleanup-test-infra.sh` - Permanent test infrastructure
-- `load-test.sh` - Continuous load testing with ephemeral VMs
-- `cleanup-load-test-resources.sh` - Cleanup leftover load-* resources
+- `load-test.sh` - Continuous load testing with ephemeral VMs (two modes: `workload` and `network`)
+- `cleanup-load-test-resources.sh` - Cleanup leftover load-* resources (servers, FIPs, ports, routers, networks)
 - `web-service/` - Flask heartbeat dashboard (deployed as container on OpenShift)
 - `k8s/` - OpenShift/Kubernetes manifests
 - `agent/` - Heartbeat agent (cloud-init userdata)
@@ -26,9 +26,19 @@ This convention is used in the dashboard (`app.py`), cleanup scripts, and load t
 
 ### Resource Naming in Load Tests
 
+**Workload mode** (VMs on existing auto-test networks):
 - Servers: `load-snat-{net_id}-iter{iteration}`, `load-fip-{net_id}-iter{iteration}`
 - Ports: `load-fip-port-{net_id}-iter{iteration}`
 - Floating IPs: no name (matched by port UUID association)
+
+**Network mode** (creates and tears down networks):
+- External networks: `load-net-iter{iteration}-{index}`
+- External subnets: `load-net-iter{iteration}-{index}-subnet`
+- Private networks: `load-net-iter{iteration}-{index}-private`
+- Private subnets: `load-net-iter{iteration}-{index}-private-v4`
+- Routers: `load-router-iter{iteration}-{index}`
+- Servers: `load-snat-iter{iteration}-{index}`, `load-fip-iter{iteration}-{index}`
+- Ports: `load-fip-port-iter{iteration}-{index}`
 
 ## Gotchas and Unintuitive Behaviors
 

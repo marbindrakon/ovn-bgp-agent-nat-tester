@@ -78,21 +78,45 @@ This adds DNS nameserver 172.18.42.10 to all 150 auto-test private subnets.
 ### 3. Run Load Tests
 
 ```bash
-# Run indefinitely
+# Show usage and all options
+./load-test.sh --help
+
+# Run workload mode indefinitely (default - churns VMs on existing auto-test networks)
 ./load-test.sh
 
-# Run specific number of iterations
-./load-test.sh 10
+# Run workload mode with specific iterations
+./load-test.sh --mode workload --iterations 10
+
+# Run network mode (creates and tears down EVPN-wired networks each iteration)
+./load-test.sh --mode network --iterations 2
+
+# Customize networks per iteration and wait time
+./load-test.sh --mode network --networks 5 --wait 180 --iterations 3
 ```
 
+**Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-m, --mode` | `workload` | Test mode: `workload` or `network` |
+| `-n, --networks` | `10` | Networks per iteration |
+| `-i, --iterations` | `0` | Max iterations (0 = unlimited) |
+| `-w, --wait` | `300` | Seconds to wait before validation |
+| `-h, --help` | | Show usage |
+
+**Test Modes:**
+
+- **`workload`** — Picks random networks from the existing auto-test-1..150 pool, creates SNAT + FIP instances, validates heartbeats, cleans up VMs.
+- **`network`** — Creates fresh EVPN-wired network sets each iteration (external VLAN network, subnet from pool, OVN EVPN config, router, private network, private subnet), creates VMs, validates, then tears down everything (VMs + networks). Requires `oc` access to the OVN northd pod.
+
 Each iteration:
-1. Selects 10 random networks from auto-test-1 through auto-test-150
+1. Selects random auto-test networks (workload mode) or creates fresh networks (network mode)
 2. Creates 20 instances (1 SNAT + 1 FIP per network) with heartbeat agents
 3. Assigns floating IPs from corresponding external networks
 4. Waits 60s (boot) + 300s (heartbeat validation delay)
 5. Validates test infrastructure health via dashboard (6 permanent instances)
 6. Validates ephemeral instances via dashboard heartbeats (20 load instances)
-7. Cleans up and repeats
+7. Cleans up VMs (and networks in network mode) and repeats
 
 ### 4. Cleanup
 
@@ -200,15 +224,15 @@ The dashboard persists state to `/tmp/heartbeat-state.json`:
 ## Load Test Behavior
 
 ### Success Path
-1. Create instances on random auto-test networks with heartbeat agents
+1. Create instances on random auto-test networks (workload mode) or fresh EVPN networks (network mode)
 2. Wait for boot (60s) + validation delay (300s)
 3. Validate 6 permanent test infrastructure instances are healthy (via dashboard)
 4. Validate all 20 ephemeral load instances are sending heartbeats (via dashboard)
-5. Cleanup all load test resources
+5. Cleanup all load test resources (VMs + networks in network mode)
 6. Repeat
 
 ### Failure Path
-- On validation failure, resources are **preserved** for troubleshooting
+- On validation failure, resources are **preserved** for troubleshooting (VMs and networks)
 - Script exits with error message and resource list
 - Manual cleanup required after investigation
 
@@ -220,12 +244,26 @@ The load test is designed to trigger OpenStack infrastructure failures:
 
 ### Configuration
 
+These can be set via command-line arguments (see `./load-test.sh --help`):
+
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `TEST_MODE` | `workload` | Test mode: `workload` or `network` |
 | `NUM_NETWORKS` | 10 | Networks per iteration |
+| `MAX_ITERATIONS` | 0 | Max iterations (0 = unlimited) |
 | `WAIT_TIME` | 300 | Seconds before validation |
 | `EPHEMERAL_STALE_THRESHOLD` | 180 | Stale threshold for ephemeral instances (seconds) |
 | `USERDATA_FILE` | `./agent/cloud-init-userdata.yaml` | Cloud-init file for heartbeat agent |
+
+Network mode also uses:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTO_TEST_PROVIDER_NETWORK` | `bgp-physnet` | Physical network for VLAN provider |
+| `AUTO_TEST_SUBNET_POOL` | `evpn-100` | Subnet pool for external subnets |
+| `AUTO_TEST_PRIVATE_CIDR` | `10.100.0.0/24` | CIDR for private subnets |
+| `AUTO_TEST_MTU` | `1500` | MTU for external networks |
+| `AUTO_TEST_VNI` | `100` | VNI for EVPN configuration |
 
 ## Troubleshooting
 
@@ -271,9 +309,11 @@ Resources are preserved on failure for troubleshooting. To cleanup leftover load
 openstack server list --name 'load-*'
 openstack floating ip list | grep 'load-'
 openstack port list --name 'load-*'
+openstack router list | grep 'load-router-'
+openstack network list | grep 'load-net-'
 ```
 
-The cleanup script only removes `load-*` resources and will NOT touch permanent test infrastructure (`test-*`).
+The cleanup script removes all `load-*` resources (servers, FIPs, ports, routers, networks) and will NOT touch permanent test infrastructure (`test-*`).
 
 ## Container Image
 

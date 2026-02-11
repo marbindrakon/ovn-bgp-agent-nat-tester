@@ -4,8 +4,16 @@
 # Creates instances on random auto-test networks to induce load,
 # validates test infrastructure, then cleans up and repeats.
 #
-# Usage: ./load-test.sh [max_iterations]
-#   max_iterations: Optional. Stop after N iterations (default: unlimited)
+# Two test modes:
+#   workload - Churns VMs on existing auto-test-1..150 networks (default)
+#   network  - Creates and tears down EVPN-wired networks each iteration
+#
+# Usage: ./load-test.sh [OPTIONS]
+#   -m, --mode MODE          Test mode: 'workload' or 'network' (default: workload)
+#   -n, --networks NUM       Networks per iteration (default: 10)
+#   -i, --iterations NUM     Max iterations, 0=unlimited (default: 0)
+#   -w, --wait SECONDS       Wait time before validation (default: 300)
+#   -h, --help               Show this help message
 #
 
 set -uo pipefail
@@ -17,16 +25,104 @@ KEYPAIR="aaustin-key"
 DASHBOARD_API_URL="https://snat-heartbeat.apps.lab-hub.lab.signal9.gg/api/instances"
 DASHBOARD_STATUS_URL="https://snat-heartbeat.apps.lab-hub.lab.signal9.gg/api/load-test/status"
 USERDATA_FILE="./agent/cloud-init-userdata.yaml"
-NUM_NETWORKS=10
-WAIT_TIME=300  # 5 minutes
+DNS_NAMESERVER="172.18.42.10"
 EPHEMERAL_STALE_THRESHOLD=180  # 3 minutes (for validation)
+
+# Defaults (overridable by arguments)
+TEST_MODE="workload"
+NUM_NETWORKS=10
+MAX_ITERATIONS=0  # 0 means unlimited
+WAIT_TIME=300     # 5 minutes
 ITERATION=0
-MAX_ITERATIONS=${1:-0}  # 0 means unlimited
+
+# Network mode configuration (from setup-test-infra.sh)
+AUTO_TEST_PROVIDER_NETWORK="bgp-physnet"
+AUTO_TEST_SUBNET_POOL="evpn-100"
+AUTO_TEST_PRIVATE_CIDR="10.100.0.0/24"
+AUTO_TEST_MTU=1500
+AUTO_TEST_VNI=100
+
+# OVN configuration for EVPN
+NBCTL_POD="ovn-northd-0"
+OVN_DB_SERVERS="ssl:ovsdbserver-nb-0.openstack.svc.cluster.local:6641,ssl:ovsdbserver-nb-1.openstack.svc.cluster.local:6641,ssl:ovsdbserver-nb-2.openstack.svc.cluster.local:6641"
+OVN_CERT="/etc/pki/tls/certs/ovndb.crt"
+OVN_KEY="/etc/pki/tls/private/ovndb.key"
+OVN_CA="/etc/pki/tls/certs/ovndbca.crt"
+
+# --- Argument Parsing ---
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Options:
+  -m, --mode MODE          Test mode: 'workload' or 'network' (default: workload)
+  -n, --networks NUM       Networks per iteration (default: 10)
+  -i, --iterations NUM     Max iterations, 0=unlimited (default: 0)
+  -w, --wait SECONDS       Wait time before validation (default: 300)
+  -h, --help               Show this help message
+
+Test Modes:
+  workload   Picks random networks from the existing auto-test-1..150 pool,
+             creates SNAT + FIP instances, validates heartbeats, cleans up.
+  network    Creates fresh EVPN-wired networks each iteration, creates SNAT +
+             FIP instances, validates heartbeats, tears down everything.
+EOF
+    exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -m|--mode)
+            TEST_MODE="$2"
+            shift 2
+            ;;
+        -n|--networks)
+            NUM_NETWORKS="$2"
+            shift 2
+            ;;
+        -i|--iterations)
+            MAX_ITERATIONS="$2"
+            shift 2
+            ;;
+        -w|--wait)
+            WAIT_TIME="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo "ERROR: Unknown option: $1"
+            echo "Run '$(basename "$0") --help' for usage."
+            exit 1
+            ;;
+    esac
+done
+
+# Validate test mode
+if [[ "$TEST_MODE" != "workload" && "$TEST_MODE" != "network" ]]; then
+    echo "ERROR: Invalid test mode '$TEST_MODE'. Must be 'workload' or 'network'."
+    exit 1
+fi
 
 # Verify userdata file exists
 if [[ ! -f "$USERDATA_FILE" ]]; then
     echo "ERROR: Userdata file not found: $USERDATA_FILE"
     exit 1
+fi
+
+# In network mode, verify OVN NB pod is reachable
+if [[ "$TEST_MODE" == "network" ]]; then
+    echo "Verifying OVN NB pod ($NBCTL_POD) is reachable..."
+    if ! oc exec "$NBCTL_POD" -- ovn-nbctl --db="$OVN_DB_SERVERS" \
+        --certificate="$OVN_CERT" --private-key="$OVN_KEY" --ca-cert="$OVN_CA" \
+        get-connection 2>/dev/null; then
+        echo "ERROR: Cannot reach OVN NB pod '$NBCTL_POD'. Network mode requires OVN access."
+        echo "Verify 'oc exec $NBCTL_POD' works and OVN DB is accessible."
+        exit 1
+    fi
+    echo "OVN NB pod reachable"
+    echo ""
 fi
 
 report_status() {
@@ -51,6 +147,151 @@ report_status() {
 
     curl -s -k -X POST -H 'Content-Type: application/json' \
         -d "$json" "$DASHBOARD_STATUS_URL" >/dev/null 2>&1 || true
+}
+
+# --- OVN Helper ---
+ovn_nbctl() {
+    oc exec "$NBCTL_POD" -- ovn-nbctl \
+        --db="$OVN_DB_SERVERS" \
+        --certificate="$OVN_CERT" \
+        --private-key="$OVN_KEY" \
+        --ca-cert="$OVN_CA" \
+        "$@"
+}
+
+# --- Network Mode Functions ---
+
+# Creates one EVPN-wired network set (external net, subnet, OVN EVPN config,
+# router, private net, private subnet, router attachment).
+# Args: $1 = name prefix (e.g. "load-net-iter1-3")
+create_network_set() {
+    local prefix="$1"
+
+    echo "Creating network set: $prefix"
+
+    # Create external network with VLAN provider
+    echo "  Creating external network: $prefix"
+    openstack network create \
+        --external \
+        --mtu "$AUTO_TEST_MTU" \
+        --provider-physical-network "$AUTO_TEST_PROVIDER_NETWORK" \
+        --provider-network-type vlan \
+        "$prefix"
+
+    # Create subnet from pool
+    echo "  Creating subnet: ${prefix}-subnet"
+    openstack subnet create \
+        --network "$prefix" \
+        --subnet-pool "$AUTO_TEST_SUBNET_POOL" \
+        "${prefix}-subnet"
+
+    # Get network UUID for OVN configuration
+    local net_uuid
+    net_uuid=$(openstack network show -f value -c id "$prefix")
+
+    # Configure EVPN on OVN logical switch
+    echo "  Configuring EVPN on logical switch"
+    ovn_nbctl set logical-switch "$net_uuid" 'external_ids:neutron_bgpvpn\:type=l3'
+    ovn_nbctl set logical-switch "$net_uuid" "external_ids:neutron_bgpvpn\:vni=${AUTO_TEST_VNI}"
+
+    # Create router with external gateway
+    echo "  Creating router: ${prefix/load-net-/load-router-}"
+    openstack router create \
+        --external-gateway "$prefix" \
+        "${prefix/load-net-/load-router-}"
+
+    # Create private network
+    echo "  Creating private network: ${prefix}-private"
+    openstack network create "${prefix}-private"
+
+    # Create private subnet
+    echo "  Creating private subnet: ${prefix}-private-v4"
+    openstack subnet create \
+        --network "${prefix}-private" \
+        --subnet-range "$AUTO_TEST_PRIVATE_CIDR" \
+        --dns-nameserver "$DNS_NAMESERVER" \
+        "${prefix}-private-v4"
+
+    # Attach private subnet to router
+    echo "  Attaching subnet to router"
+    openstack router add subnet "${prefix/load-net-/load-router-}" "${prefix}-private-v4"
+
+    echo "  Network set $prefix complete"
+}
+
+# Tears down one network set in reverse order.
+# Args: $1 = name prefix (e.g. "load-net-iter1-3")
+cleanup_network_set() {
+    local prefix="$1"
+    local router="${prefix/load-net-/load-router-}"
+
+    echo "Cleaning up network set: $prefix"
+
+    # Detach private subnet from router
+    echo "  Detaching subnet from router"
+    openstack router remove subnet "$router" "${prefix}-private-v4" 2>/dev/null || true
+
+    # Delete router
+    echo "  Deleting router: $router"
+    openstack router delete "$router" 2>/dev/null || true
+
+    # Delete private subnet
+    echo "  Deleting private subnet: ${prefix}-private-v4"
+    openstack subnet delete "${prefix}-private-v4" 2>/dev/null || true
+
+    # Delete private network
+    echo "  Deleting private network: ${prefix}-private"
+    openstack network delete "${prefix}-private" 2>/dev/null || true
+
+    # Delete external subnet
+    echo "  Deleting external subnet: ${prefix}-subnet"
+    openstack subnet delete "${prefix}-subnet" 2>/dev/null || true
+
+    # Delete external network
+    echo "  Deleting external network: $prefix"
+    openstack network delete "$prefix" 2>/dev/null || true
+
+    echo "  Network set $prefix cleanup complete"
+}
+
+# Track created networks for cleanup
+declare -a CREATED_NETWORKS
+
+# Creates NUM_NETWORKS network sets for the current iteration.
+create_iteration_networks() {
+    CREATED_NETWORKS=()
+
+    echo ""
+    echo "=== Creating $NUM_NETWORKS network sets for iteration $ITERATION ==="
+
+    for idx in $(seq 1 "$NUM_NETWORKS"); do
+        local prefix="load-net-iter${ITERATION}-${idx}"
+        if ! create_network_set "$prefix"; then
+            echo "ERROR: Failed to create network set $prefix"
+            return 1
+        fi
+        CREATED_NETWORKS+=("$prefix")
+        echo ""
+    done
+
+    echo "Created ${#CREATED_NETWORKS[@]} network sets"
+}
+
+# Cleans up all networks created for the current iteration.
+cleanup_iteration_networks() {
+    if [[ ${#CREATED_NETWORKS[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    echo ""
+    echo "=== Cleaning up iteration network sets ==="
+
+    for prefix in "${CREATED_NETWORKS[@]}"; do
+        cleanup_network_set "$prefix"
+    done
+
+    CREATED_NETWORKS=()
+    echo "Network cleanup complete"
 }
 
 # Track created resources for cleanup
@@ -94,6 +335,11 @@ cleanup_iteration() {
     CREATED_PORTS=()
 
     echo "Cleanup complete"
+
+    # In network mode, also tear down the networks
+    if [[ "$TEST_MODE" == "network" ]]; then
+        cleanup_iteration_networks
+    fi
 }
 
 # Track if cleanup should run on exit (only on success or Ctrl+C, not on failure)
@@ -109,10 +355,12 @@ cleanup_on_exit() {
         echo "  Servers: ${CREATED_SERVERS[*]:-none}"
         echo "  Floating IPs: ${CREATED_FIPS[*]:-none}"
         echo "  Ports: ${CREATED_PORTS[*]:-none}"
+        if [[ "$TEST_MODE" == "network" && ${#CREATED_NETWORKS[@]} -gt 0 ]]; then
+            echo "  Networks: ${CREATED_NETWORKS[*]}"
+        fi
         echo ""
         echo "To manually cleanup, run:"
-        echo "  openstack server list --name 'load-*-iter${ITERATION}'"
-        echo "  openstack floating ip list | grep 'load-'"
+        echo "  ./cleanup-load-test-resources.sh"
     fi
 }
 
@@ -190,38 +438,31 @@ validate_ephemeral_instances() {
     return 0
 }
 
-run_iteration() {
-    ITERATION=$((ITERATION + 1))
-    echo ""
-    echo "========================================"
-    echo "Starting iteration $ITERATION at $(date)"
-    echo "========================================"
-    report_status "running" "$ITERATION" "$MAX_ITERATIONS"
-
-    # Reset tracking arrays
-    CREATED_SERVERS=()
-    CREATED_FIPS=()
-    CREATED_PORTS=()
-
-    # Step 1: Choose 10 random auto-test networks
-    echo ""
-    echo "=== Step 1: Selecting random networks ==="
-    NETWORK_IDS=($(shuf -i 1-150 -n $NUM_NETWORKS | sort -n))
-    echo "Selected networks: ${NETWORK_IDS[*]}"
-
-    # Step 2 & 3: Create instances and assign FIPs
-    echo ""
-    echo "=== Step 2 & 3: Creating instances ==="
-
-    for NET_ID in "${NETWORK_IDS[@]}"; do
-        PRIVATE_NET="auto-test-${NET_ID}-private"
-        EXTERNAL_NET="auto-test-${NET_ID}"
-        SNAT_NAME="load-snat-${NET_ID}-iter${ITERATION}"
-        FIP_NAME="load-fip-${NET_ID}-iter${ITERATION}"
-        FIP_PORT="load-fip-port-${NET_ID}-iter${ITERATION}"
+# Create VMs on a list of network identifiers.
+# In workload mode, identifiers are auto-test network IDs (numbers).
+# In network mode, identifiers are network prefixes (load-net-iter1-3).
+# Args: array of network identifiers via ITERATION_NETWORK_IDS
+create_vms_on_networks() {
+    for NET_ID in "${ITERATION_NETWORK_IDS[@]}"; do
+        if [[ "$TEST_MODE" == "workload" ]]; then
+            PRIVATE_NET="auto-test-${NET_ID}-private"
+            EXTERNAL_NET="auto-test-${NET_ID}"
+            SNAT_NAME="load-snat-${NET_ID}-iter${ITERATION}"
+            FIP_NAME="load-fip-${NET_ID}-iter${ITERATION}"
+            FIP_PORT="load-fip-port-${NET_ID}-iter${ITERATION}"
+        else
+            # network mode: NET_ID is a prefix like "load-net-iter1-3"
+            PRIVATE_NET="${NET_ID}-private"
+            EXTERNAL_NET="$NET_ID"
+            # Extract the index portion for naming (e.g. "iter1-3")
+            local suffix="${NET_ID#load-net-}"
+            SNAT_NAME="load-snat-${suffix}"
+            FIP_NAME="load-fip-${suffix}"
+            FIP_PORT="load-fip-port-${suffix}"
+        fi
 
         echo ""
-        echo "--- Network $NET_ID ---"
+        echo "--- Network: $NET_ID ---"
 
         # Create SNAT instance
         echo "Creating SNAT instance: $SNAT_NAME"
@@ -279,6 +520,74 @@ run_iteration() {
         CREATED_FIPS+=("$FIP_ID")
         echo "Assigned floating IP: $FIP_ADDR"
     done
+}
+
+collect_failed_vms() {
+    local -n _failed_vms=$1
+    RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 -k "$DASHBOARD_API_URL?type=ephemeral&hostname_prefix=load-")
+    if [[ -n "$RESPONSE" ]]; then
+        # Stale instances
+        while IFS= read -r vm; do
+            [[ -n "$vm" ]] && _failed_vms+=("$vm")
+        done < <(echo "$RESPONSE" | jq -r "[.instances[] | select(.hostname | contains(\"-iter${ITERATION}\")) | select(.is_stale == true)] | .[].hostname")
+    fi
+    # Also find expected instances that never reported at all
+    for NET_ID in "${ITERATION_NETWORK_IDS[@]}"; do
+        if [[ "$TEST_MODE" == "workload" ]]; then
+            local snat_name="load-snat-${NET_ID}-iter${ITERATION}"
+            local fip_name="load-fip-${NET_ID}-iter${ITERATION}"
+        else
+            local suffix="${NET_ID#load-net-}"
+            local snat_name="load-snat-${suffix}"
+            local fip_name="load-fip-${suffix}"
+        fi
+        for expected_name in "$snat_name" "$fip_name"; do
+            if [[ -n "$RESPONSE" ]] && ! echo "$RESPONSE" | jq -e ".instances[] | select(.hostname == \"$expected_name\")" >/dev/null 2>&1; then
+                _failed_vms+=("$expected_name (no heartbeat)")
+            fi
+        done
+    done
+}
+
+run_iteration() {
+    ITERATION=$((ITERATION + 1))
+    echo ""
+    echo "========================================"
+    echo "Starting iteration $ITERATION at $(date) [mode: $TEST_MODE]"
+    echo "========================================"
+    report_status "running" "$ITERATION" "$MAX_ITERATIONS"
+
+    # Reset tracking arrays
+    CREATED_SERVERS=()
+    CREATED_FIPS=()
+    CREATED_PORTS=()
+    CREATED_NETWORKS=()
+
+    # Build the list of networks to use this iteration
+    declare -a ITERATION_NETWORK_IDS
+
+    if [[ "$TEST_MODE" == "workload" ]]; then
+        # Workload mode: pick random auto-test networks
+        echo ""
+        echo "=== Step 1: Selecting random networks ==="
+        ITERATION_NETWORK_IDS=($(shuf -i 1-150 -n "$NUM_NETWORKS" | sort -n))
+        echo "Selected networks: ${ITERATION_NETWORK_IDS[*]}"
+    else
+        # Network mode: create fresh networks
+        if ! create_iteration_networks; then
+            echo "ERROR: Failed to create iteration networks"
+            return 1
+        fi
+        ITERATION_NETWORK_IDS=("${CREATED_NETWORKS[@]}")
+    fi
+
+    # Create instances on selected/created networks
+    echo ""
+    echo "=== Creating instances ==="
+
+    if ! create_vms_on_networks; then
+        return 1
+    fi
 
     echo ""
     echo "Created ${#CREATED_SERVERS[@]} servers, ${#CREATED_FIPS[@]} floating IPs"
@@ -288,9 +597,9 @@ run_iteration() {
     echo "=== Waiting for instances to boot (60s) ==="
     sleep 60
 
-    # Step 4: Wait 5 minutes then validate
+    # Wait then validate
     echo ""
-    echo "=== Step 4: Waiting $WAIT_TIME seconds before validation ==="
+    echo "=== Waiting $WAIT_TIME seconds before validation ==="
     REMAINING=$WAIT_TIME
     while [[ $REMAINING -gt 0 ]]; do
         echo -ne "\r  Time remaining: ${REMAINING}s   "
@@ -323,23 +632,7 @@ run_iteration() {
     if ! validate_ephemeral_instances "$EXPECTED_INSTANCES"; then
         echo ""
         echo "!!! TEST FAILED: Ephemeral instance validation failed !!!"
-        # Collect missing/stale ephemeral instance names
-        RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 -k "$DASHBOARD_API_URL?type=ephemeral&hostname_prefix=load-")
-        if [[ -n "$RESPONSE" ]]; then
-            # Stale instances
-            while IFS= read -r vm; do
-                [[ -n "$vm" ]] && FAILED_VMS+=("$vm")
-            done < <(echo "$RESPONSE" | jq -r "[.instances[] | select(.hostname | contains(\"-iter${ITERATION}\")) | select(.is_stale == true)] | .[].hostname")
-        fi
-        # Also find expected instances that never reported at all
-        for NET_ID in "${NETWORK_IDS[@]}"; do
-            for prefix in "load-snat" "load-fip"; do
-                expected_name="${prefix}-${NET_ID}-iter${ITERATION}"
-                if [[ -n "$RESPONSE" ]] && ! echo "$RESPONSE" | jq -e ".instances[] | select(.hostname == \"$expected_name\")" >/dev/null 2>&1; then
-                    FAILED_VMS+=("$expected_name (no heartbeat)")
-                fi
-            done
-        done
+        collect_failed_vms FAILED_VMS
         report_status "failed" "$ITERATION" "$MAX_ITERATIONS" "${FAILED_VMS[@]}"
         return 1
     fi
@@ -347,7 +640,7 @@ run_iteration() {
     echo ""
     echo "=== Iteration $ITERATION PASSED ==="
 
-    # Step 6: Cleanup on success
+    # Cleanup on success
     CLEANUP_ON_EXIT=true
     cleanup_iteration
     CLEANUP_ON_EXIT=false
@@ -361,6 +654,7 @@ echo "OpenStack Load Test Script"
 echo "========================================"
 echo ""
 echo "Configuration:"
+echo "  Test mode: $TEST_MODE"
 echo "  Networks per iteration: $NUM_NETWORKS"
 echo "  Instances per iteration: $((NUM_NETWORKS * 2))"
 echo "  Wait time: ${WAIT_TIME}s"
@@ -374,6 +668,14 @@ else
     echo "  Max iterations: unlimited"
 fi
 echo "  Cleanup on failure: NO (resources preserved for troubleshooting)"
+if [[ "$TEST_MODE" == "network" ]]; then
+    echo ""
+    echo "Network mode settings:"
+    echo "  Provider network: $AUTO_TEST_PROVIDER_NETWORK"
+    echo "  Subnet pool: $AUTO_TEST_SUBNET_POOL"
+    echo "  Private CIDR: $AUTO_TEST_PRIVATE_CIDR"
+    echo "  MTU: $AUTO_TEST_MTU"
+fi
 echo ""
 echo "Press Ctrl+C to stop"
 echo ""

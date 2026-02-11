@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Cleanup Load Test Resources Script
-# Removes leftover load test VMs, floating IPs, and ports
+# Removes leftover load test VMs, floating IPs, ports, networks, and routers
 # Does NOT touch permanent test infrastructure (test-* resources)
 #
 
@@ -13,6 +13,8 @@ echo "This script will remove all load-* resources:"
 echo "  - Servers (VMs)"
 echo "  - Floating IPs"
 echo "  - Ports"
+echo "  - Routers (load-router-*)"
+echo "  - Networks (load-net-*)"
 echo ""
 echo "Permanent test infrastructure (test-*) will NOT be affected."
 echo ""
@@ -118,10 +120,88 @@ cleanup_ports() {
     echo ""
 }
 
-# Perform cleanup in correct dependency order
+# Function to cleanup load test routers (network mode leftovers)
+cleanup_routers() {
+    echo "----------------------------------------"
+    echo "Cleaning up load test routers"
+    echo "----------------------------------------"
+
+    ROUTERS=$(openstack router list -f value -c Name 2>/dev/null | grep '^load-router-' || true)
+
+    if [[ -z "$ROUTERS" ]]; then
+        echo "No load test routers found"
+        return 0
+    fi
+
+    ROUTER_COUNT=$(echo "$ROUTERS" | wc -l)
+    echo "Found $ROUTER_COUNT load test routers"
+
+    echo "$ROUTERS" | while read -r router; do
+        # Detach all subnets from the router before deleting
+        SUBNET_IDS=$(openstack router show "$router" -f json 2>/dev/null \
+            | jq -r '.interfaces_info[]?.subnet_id // empty' 2>/dev/null || true)
+        if [[ -n "$SUBNET_IDS" ]]; then
+            echo "$SUBNET_IDS" | while read -r subnet_id; do
+                [[ -z "$subnet_id" ]] && continue
+                echo "  Detaching subnet $subnet_id from $router"
+                openstack router remove subnet "$router" "$subnet_id" 2>/dev/null || true
+            done
+        fi
+
+        echo "  Deleting router: $router"
+        openstack router delete "$router" 2>/dev/null || echo "    Failed to delete $router"
+    done
+
+    echo "Router cleanup complete"
+    echo ""
+}
+
+# Function to cleanup load test networks (network mode leftovers)
+cleanup_networks() {
+    echo "----------------------------------------"
+    echo "Cleaning up load test networks"
+    echo "----------------------------------------"
+
+    NETWORKS=$(openstack network list -f value -c Name 2>/dev/null | grep '^load-net-' || true)
+
+    if [[ -z "$NETWORKS" ]]; then
+        echo "No load test networks found"
+        return 0
+    fi
+
+    NETWORK_COUNT=$(echo "$NETWORKS" | wc -l)
+    echo "Found $NETWORK_COUNT load test networks"
+
+    echo "$NETWORKS" | while read -r network; do
+        # Delete subnets on this network first
+        SUBNET_IDS=$(openstack subnet list --network "$network" -f value -c ID 2>/dev/null || true)
+        if [[ -n "$SUBNET_IDS" ]]; then
+            echo "$SUBNET_IDS" | while read -r subnet_id; do
+                [[ -z "$subnet_id" ]] && continue
+                echo "  Deleting subnet $subnet_id on $network"
+                openstack subnet delete "$subnet_id" 2>/dev/null || true
+            done
+        fi
+
+        echo "  Deleting network: $network"
+        openstack network delete "$network" 2>/dev/null || echo "    Failed to delete $network"
+    done
+
+    echo "Network cleanup complete"
+    echo ""
+}
+
+# Perform cleanup in correct dependency order:
+# 1. FIPs (attached to ports)
+# 2. Servers (attached to ports/networks)
+# 3. Ports (attached to networks)
+# 4. Routers (attached to networks via subnets)
+# 5. Networks (and their subnets)
 cleanup_floating_ips
 cleanup_servers
 cleanup_ports
+cleanup_routers
+cleanup_networks
 
 echo "=== Load Test Resource Cleanup Complete ==="
 echo ""
@@ -129,11 +209,15 @@ echo ""
 # Show remaining load test resources (if any)
 REMAINING_SERVERS=$(openstack server list -f value -c Name 2>/dev/null | grep -c '^load-' || true)
 REMAINING_PORTS=$(openstack port list -f value -c Name 2>/dev/null | grep -c '^load-' || true)
+REMAINING_ROUTERS=$(openstack router list -f value -c Name 2>/dev/null | grep -c '^load-router-' || true)
+REMAINING_NETWORKS=$(openstack network list -f value -c Name 2>/dev/null | grep -c '^load-net-' || true)
 
-if [[ $REMAINING_SERVERS -gt 0 ]] || [[ $REMAINING_PORTS -gt 0 ]]; then
+if [[ $REMAINING_SERVERS -gt 0 ]] || [[ $REMAINING_PORTS -gt 0 ]] || [[ $REMAINING_ROUTERS -gt 0 ]] || [[ $REMAINING_NETWORKS -gt 0 ]]; then
     echo "WARNING: Some resources could not be cleaned up:"
     [[ $REMAINING_SERVERS -gt 0 ]] && echo "  - Servers: $REMAINING_SERVERS"
     [[ $REMAINING_PORTS -gt 0 ]] && echo "  - Ports: $REMAINING_PORTS"
+    [[ $REMAINING_ROUTERS -gt 0 ]] && echo "  - Routers: $REMAINING_ROUTERS"
+    [[ $REMAINING_NETWORKS -gt 0 ]] && echo "  - Networks: $REMAINING_NETWORKS"
     echo ""
     echo "Run this script again or clean up manually."
     exit 1

@@ -23,6 +23,7 @@ AUTO_TEST_PROVIDER_NETWORK="bgp-physnet"
 AUTO_TEST_SUBNET_POOL="evpn-100"
 AUTO_TEST_PRIVATE_CIDR="10.100.0.0/24"
 AUTO_TEST_MTU=1500
+AUTO_TEST_VNI=100
 
 # Address scope and subnet pool configuration
 ADDRESS_SCOPE_NAME="evpn-100"
@@ -144,8 +145,8 @@ create_auto_test_networks() {
 
         # Configure EVPN on OVN logical switch
         echo "Configuring EVPN on logical switch"
-        ovn_nbctl set logical-switch "$NET_UUID" 'external_ids:"neutron_bgpvpn\:type"="l3"'
-        ovn_nbctl set logical-switch "$NET_UUID" 'external_ids:"neutron_bgpvpn\:vni"="100"'
+        ovn_nbctl set logical-switch "$NET_UUID" 'external_ids:neutron_bgpvpn\:type=l3'
+        ovn_nbctl set logical-switch "$NET_UUID" "external_ids:neutron_bgpvpn\:vni=${AUTO_TEST_VNI}"
 
         # Create router with external gateway
         echo "Creating router: auto-test-$i"
