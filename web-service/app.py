@@ -154,6 +154,7 @@ def dashboard():
 
         is_stale = data['last_seen'] < stale_threshold
         seconds_ago = (now - data['last_seen']).total_seconds()
+        is_warning = not is_stale and seconds_ago > (stale_threshold_seconds * 0.5)
 
         instance_list.append({
             'instance_id': instance_id,
@@ -165,6 +166,7 @@ def dashboard():
             'last_seen': data['last_seen'].isoformat(),
             'seconds_ago': int(seconds_ago),
             'is_stale': is_stale,
+            'is_warning': is_warning,
         })
 
     # Sort by availability zone, then by vm_type
@@ -257,7 +259,8 @@ def api_instances():
 def load_test_status():
     """Load the current load test status from file."""
     default = {'status': 'idle', 'iteration': 0, 'max_iterations': 0,
-               'failed_vms': [], 'started_at': None, 'updated_at': None}
+               'failed_vms': [], 'started_at': None, 'updated_at': None,
+               'phase': '', 'test_mode': ''}
     if os.path.exists(LOAD_TEST_STATUS_FILE):
         try:
             with open(LOAD_TEST_STATUS_FILE, 'r') as f:
@@ -267,10 +270,23 @@ def load_test_status():
                     updated = datetime.fromisoformat(data['updated_at'])
                     if (datetime.utcnow() - updated).total_seconds() > 900:
                         return default
-                return {**default, **data}
+                merged = {**default, **data}
+                # Compute elapsed seconds
+                if merged.get('started_at'):
+                    start = datetime.fromisoformat(merged['started_at'])
+                    if merged['status'] == 'running':
+                        end = datetime.utcnow()
+                    elif merged.get('updated_at'):
+                        end = datetime.fromisoformat(merged['updated_at'])
+                    else:
+                        end = start
+                    merged['elapsed_seconds'] = int((end - start).total_seconds())
+                else:
+                    merged['elapsed_seconds'] = 0
+                return merged
         except (json.JSONDecodeError, IOError):
             pass
-    return default
+    return {**default, 'elapsed_seconds': 0}
 
 
 def save_test_status(data):
@@ -312,6 +328,11 @@ def update_load_test_status():
     if 'max_iterations' in data:
         current['max_iterations'] = data['max_iterations']
 
+    if 'phase' in data:
+        current['phase'] = data['phase']
+    if 'test_mode' in data:
+        current['test_mode'] = data['test_mode']
+
     if status == 'running':
         if not current.get('started_at'):
             current['started_at'] = datetime.utcnow().isoformat()
@@ -322,6 +343,8 @@ def update_load_test_status():
     elif status == 'idle':
         current['started_at'] = None
         current['failed_vms'] = []
+        current['phase'] = ''
+        current['test_mode'] = ''
 
     save_test_status(current)
     return jsonify({'status': 'ok'}), 200

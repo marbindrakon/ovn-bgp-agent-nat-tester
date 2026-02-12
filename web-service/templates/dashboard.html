@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SNAT Test Heartbeat Dashboard</title>
+    <title>OVN NAT Test Dashboard</title>
     <meta http-equiv="refresh" content="30">
     <style>
         * {
@@ -21,10 +21,55 @@
 
         h1 {
             text-align: center;
-            margin-bottom: 20px;
+            margin-bottom: 6px;
             color: #00d4ff;
         }
 
+        .subtitle {
+            text-align: center;
+            color: #888;
+            font-size: 0.9em;
+            max-width: 640px;
+            margin: 0 auto 24px;
+            line-height: 1.4;
+        }
+
+        /* Health banner */
+        .health-banner {
+            text-align: center;
+            padding: 14px 20px;
+            border-radius: 10px;
+            font-weight: 600;
+            font-size: 1.05em;
+            margin-bottom: 24px;
+        }
+
+        .health-banner.health-ok {
+            background: #00ff8818;
+            color: #00ff88;
+            border: 1px solid #00ff8830;
+        }
+
+        .health-banner.health-error {
+            background: #ff475718;
+            color: #ff4757;
+            border: 1px solid #ff475730;
+        }
+
+        .health-banner.health-warn {
+            background: #f59e0b18;
+            color: #fbbf24;
+            border: 1px solid #f59e0b30;
+        }
+
+        .health-detail {
+            font-weight: 400;
+            font-size: 0.88em;
+            margin-top: 4px;
+            opacity: 0.85;
+        }
+
+        /* Summary */
         .summary {
             display: flex;
             justify-content: center;
@@ -32,15 +77,42 @@
             margin-bottom: 30px;
         }
 
+        .summary-group {
+            background: #0f1a2e;
+            border-radius: 12px;
+            padding: 15px 20px;
+        }
+
+        .summary-group-label {
+            text-align: center;
+            font-size: 0.85em;
+            color: #ccc;
+            text-transform: uppercase;
+            margin-bottom: 2px;
+            letter-spacing: 0.05em;
+        }
+
+        .summary-group-desc {
+            text-align: center;
+            font-size: 0.75em;
+            color: #666;
+            margin-bottom: 10px;
+        }
+
+        .summary-group-cards {
+            display: flex;
+            gap: 15px;
+        }
+
         .summary-card {
             background: #16213e;
-            padding: 20px 40px;
+            padding: 10px 20px;
             border-radius: 10px;
             text-align: center;
         }
 
         .summary-card .number {
-            font-size: 3em;
+            font-size: 2em;
             font-weight: bold;
         }
 
@@ -62,121 +134,7 @@
             color: #00d4ff;
         }
 
-        .summary-group {
-            background: #0f1a2e;
-            border-radius: 12px;
-            padding: 15px 20px;
-        }
-
-        .summary-group-label {
-            text-align: center;
-            font-size: 0.85em;
-            color: #888;
-            text-transform: uppercase;
-            margin-bottom: 10px;
-            letter-spacing: 0.05em;
-        }
-
-        .summary-group-cards {
-            display: flex;
-            gap: 15px;
-        }
-
-        .summary-group .summary-card {
-            padding: 10px 20px;
-        }
-
-        .summary-group .summary-card .number {
-            font-size: 2em;
-        }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            background: #16213e;
-            border-radius: 10px;
-            overflow: hidden;
-        }
-
-        th, td {
-            padding: 15px;
-            text-align: left;
-        }
-
-        th {
-            background: #0f3460;
-            color: #00d4ff;
-            font-weight: 600;
-            text-transform: uppercase;
-            font-size: 0.85em;
-        }
-
-        tr:nth-child(even) {
-            background: #1a1a3e;
-        }
-
-        tr:hover {
-            background: #252550;
-        }
-
-        tr.stale {
-            background: #3d1a1a !important;
-        }
-
-        tr.stale:hover {
-            background: #4d2020 !important;
-        }
-
-        .status-badge {
-            display: inline-block;
-            padding: 5px 12px;
-            border-radius: 20px;
-            font-size: 0.85em;
-            font-weight: 600;
-        }
-
-        .status-healthy {
-            background: #00ff8820;
-            color: #00ff88;
-        }
-
-        .status-stale {
-            background: #ff475720;
-            color: #ff4757;
-            animation: pulse 1.5s infinite;
-        }
-
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-
-        .az-badge {
-            display: inline-block;
-            padding: 3px 10px;
-            border-radius: 5px;
-            background: #0f3460;
-            color: #00d4ff;
-            font-size: 0.9em;
-        }
-
-        .vm-type {
-            display: inline-block;
-            padding: 3px 10px;
-            border-radius: 5px;
-            font-size: 0.9em;
-        }
-
-        .vm-type-snat {
-            background: #7c3aed20;
-            color: #a78bfa;
-        }
-
-        .vm-type-fip {
-            background: #f59e0b20;
-            color: #fbbf24;
-        }
-
+        /* Load test */
         .load-test-status {
             margin-bottom: 30px;
             border-radius: 10px;
@@ -207,7 +165,7 @@
             display: flex;
             align-items: center;
             gap: 12px;
-            margin-bottom: 8px;
+            margin-bottom: 4px;
         }
 
         .lt-header h2 {
@@ -245,8 +203,39 @@
             color: #ff4757;
         }
 
+        .lt-desc {
+            color: #777;
+            font-size: 0.82em;
+            margin-bottom: 8px;
+        }
+
         .lt-details {
             color: #aaa;
+            font-size: 0.9em;
+        }
+
+        .lt-progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #0f1a2e;
+            border-radius: 4px;
+            margin-top: 10px;
+            overflow: hidden;
+        }
+
+        .lt-progress-fill {
+            height: 100%;
+            background: #00ff88;
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+
+        .lt-failed-reason {
+            margin-top: 8px;
+            padding: 10px 14px;
+            background: #2a1010;
+            border-radius: 6px;
+            color: #ff8888;
             font-size: 0.9em;
         }
 
@@ -282,6 +271,115 @@
             color: #ff4757;
         }
 
+        /* Table */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #16213e;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        th, td {
+            padding: 15px;
+            text-align: left;
+        }
+
+        th {
+            background: #0f3460;
+            color: #00d4ff;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.85em;
+        }
+
+        tr:nth-child(even) {
+            background: #1a1a3e;
+        }
+
+        tr:hover {
+            background: #252550;
+        }
+
+        tr.stale {
+            background: #3d1a1a !important;
+        }
+
+        tr.stale:hover {
+            background: #4d2020 !important;
+        }
+
+        tr.warning {
+            background: #3d3a1a !important;
+        }
+
+        tr.warning:hover {
+            background: #4d4a20 !important;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+
+        .status-healthy {
+            background: #00ff8820;
+            color: #00ff88;
+        }
+
+        .status-stale {
+            background: #ff475720;
+            color: #ff4757;
+            animation: pulse 1.5s infinite;
+        }
+
+        .status-warning {
+            background: #f59e0b20;
+            color: #fbbf24;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .az-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 5px;
+            background: #0f3460;
+            color: #00d4ff;
+            font-size: 0.9em;
+        }
+
+        .vm-type {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 5px;
+            font-size: 0.9em;
+        }
+
+        .vm-type-snat {
+            background: #7c3aed20;
+            color: #a78bfa;
+        }
+
+        .vm-type-fip {
+            background: #f59e0b20;
+            color: #fbbf24;
+        }
+
+        .ip-muted {
+            color: #666;
+        }
+
+        .last-seen-warning {
+            color: #fbbf24;
+        }
+
         .no-instances {
             text-align: center;
             padding: 50px;
@@ -296,9 +394,34 @@
             font-size: 0.85em;
         }
 
-        .actions {
+        /* Admin section */
+        .admin-section {
             text-align: center;
             margin-top: 15px;
+        }
+
+        .admin-toggle {
+            background: none;
+            border: 1px solid #333;
+            color: #666;
+            padding: 6px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.8em;
+        }
+
+        .admin-toggle:hover {
+            border-color: #555;
+            color: #888;
+        }
+
+        .admin-actions {
+            display: none;
+            margin-top: 10px;
+        }
+
+        .admin-actions.open {
+            display: block;
         }
 
         .btn-clear {
@@ -318,26 +441,42 @@
     </style>
 </head>
 <body>
-    <h1>SNAT Test Heartbeat Dashboard</h1>
+    <h1>OVN NAT Test Dashboard</h1>
+    <p class="subtitle">Monitors BGP routing health across 3 availability zones by tracking heartbeats from test VMs using SNAT and floating IP connectivity.</p>
 
-    <div class="summary">
-        <div class="summary-card total">
-            <div class="number">{{ total_count }}</div>
-            <div class="label">Total Instances</div>
-        </div>
-        <div class="summary-card healthy">
-            <div class="number">{{ healthy_count }}</div>
-            <div class="label">Healthy</div>
-        </div>
-        <div class="summary-card stale">
-            <div class="number">{{ stale_count }}</div>
-            <div class="label">Stale</div>
-        </div>
+    {# --- Health banner --- #}
+    {% set perm_has_stale = perm_stale > 0 %}
+    {% set lt_failed = load_test.status == 'failed' %}
+    {% set lt_running = load_test.status == 'running' %}
+
+    {% if perm_has_stale or lt_failed %}
+    <div class="health-banner health-error">
+        {% if perm_has_stale and lt_failed %}
+            {{ perm_stale }} baseline instance{{ 's are' if perm_stale != 1 else ' is' }} unresponsive and the load test has failed.
+        {% elif perm_has_stale %}
+            {{ perm_stale }} baseline instance{{ 's are' if perm_stale != 1 else ' is' }} unresponsive &mdash; heartbeats have not been received within the expected window.
+        {% else %}
+            Load test failed on iteration {{ load_test.iteration }}.
+        {% endif %}
     </div>
+    {% elif lt_running %}
+    <div class="health-banner health-warn">
+        Load test in progress &mdash; iteration {{ load_test.iteration }}{% if load_test.max_iterations > 0 %} of {{ load_test.max_iterations }}{% endif %}
+    </div>
+    {% else %}
+    <div class="health-banner health-ok">
+        All systems healthy
+        {% if perm_total > 0 %}
+        <div class="health-detail">{{ perm_healthy }} baseline instance{{ 's' if perm_healthy != 1 else '' }} reporting normally</div>
+        {% endif %}
+    </div>
+    {% endif %}
 
+    {# --- Summary cards --- #}
     <div class="summary">
         <div class="summary-group">
-            <div class="summary-group-label">Permanent (test-*)</div>
+            <div class="summary-group-label">Baseline Instances</div>
+            <div class="summary-group-desc">Always-on VMs that validate steady-state routing</div>
             <div class="summary-group-cards">
                 <div class="summary-card total">
                     <div class="number">{{ perm_total }}</div>
@@ -347,14 +486,17 @@
                     <div class="number">{{ perm_healthy }}</div>
                     <div class="label">Healthy</div>
                 </div>
+                {% if perm_stale > 0 %}
                 <div class="summary-card stale">
                     <div class="number">{{ perm_stale }}</div>
-                    <div class="label">Stale (&gt;5 min)</div>
+                    <div class="label">Unresponsive</div>
                 </div>
+                {% endif %}
             </div>
         </div>
         <div class="summary-group">
-            <div class="summary-group-label">Ephemeral (load-*)</div>
+            <div class="summary-group-label">Load Test Instances</div>
+            <div class="summary-group-desc">Short-lived VMs created during load tests</div>
             <div class="summary-group-cards">
                 <div class="summary-card total">
                     <div class="number">{{ eph_total }}</div>
@@ -364,29 +506,65 @@
                     <div class="number">{{ eph_healthy }}</div>
                     <div class="label">Healthy</div>
                 </div>
+                {% if eph_stale > 0 %}
                 <div class="summary-card stale">
                     <div class="number">{{ eph_stale }}</div>
-                    <div class="label">Stale (&gt;3 min)</div>
+                    <div class="label">Unresponsive</div>
                 </div>
+                {% endif %}
             </div>
         </div>
     </div>
 
+    {# --- Load test status --- #}
     <div class="load-test-status lt-{{ load_test.status }}">
         <div class="lt-header">
             <h2>Load Test</h2>
             <span class="lt-badge lt-badge-{{ load_test.status }}">{{ load_test.status }}</span>
         </div>
+        <div class="lt-desc">Repeatedly creates and validates networking across all 3 AZs to stress-test BGP route convergence.</div>
         <div class="lt-details">
             {% if load_test.status == 'idle' %}
                 No load test in progress.
             {% elif load_test.status == 'running' %}
+                {% if load_test.test_mode %}<strong>{{ load_test.test_mode }}</strong> mode &mdash; {% endif %}
                 Iteration {{ load_test.iteration }}{% if load_test.max_iterations > 0 %} of {{ load_test.max_iterations }}{% endif %}
-                {% if load_test.started_at %}&mdash; started {{ load_test.started_at }}{% endif %}
+                {% if load_test.phase %}
+                    &mdash;
+                    {% if load_test.phase == 'selecting_networks' %}selecting networks
+                    {% elif load_test.phase == 'stale_route_check' %}checking for stale routes
+                    {% elif load_test.phase == 'creating_networks' %}creating networks
+                    {% elif load_test.phase == 'creating_vms' %}creating VMs
+                    {% elif load_test.phase == 'booting' %}waiting for VMs to boot
+                    {% elif load_test.phase == 'waiting' %}waiting before validation
+                    {% elif load_test.phase == 'validating' %}validating instances
+                    {% elif load_test.phase == 'cleanup' %}cleaning up iteration resources
+                    {% else %}{{ load_test.phase }}
+                    {% endif %}
+                {% endif %}
+                {% if load_test.max_iterations > 0 %}
+                <div class="lt-progress-bar">
+                    <div class="lt-progress-fill" style="width: {{ (load_test.iteration / load_test.max_iterations * 100) | int }}%"></div>
+                </div>
+                {% endif %}
             {% elif load_test.status == 'completed' %}
-                Completed {{ load_test.iteration }} iteration{{ 's' if load_test.iteration != 1 else '' }} successfully.
+                {% if load_test.test_mode %}<strong>{{ load_test.test_mode }}</strong> mode &mdash; {% endif %}
+                {{ load_test.iteration }}/{{ load_test.max_iterations if load_test.max_iterations > 0 else load_test.iteration }} iterations passed
+                {% if load_test.elapsed_seconds %}
+                    in {{ (load_test.elapsed_seconds // 3600) }}h {{ '%02d' | format((load_test.elapsed_seconds % 3600) // 60) }}m
+                {% endif %}
             {% elif load_test.status == 'failed' %}
+                {% if load_test.test_mode %}<strong>{{ load_test.test_mode }}</strong> mode &mdash; {% endif %}
                 Failed on iteration {{ load_test.iteration }}{% if load_test.max_iterations > 0 %} of {{ load_test.max_iterations }}{% endif %}.
+                {% if load_test.phase == 'stale_route_check' %}
+                <div class="lt-failed-reason">
+                    Stale routes were detected using the evpn-100 subnet pool prefix. Ensure there are no manually-created subnets using the evpn-100 subnet pool.
+                </div>
+                {% elif load_test.failed_vms %}
+                <div class="lt-failed-reason">
+                    {{ load_test.failed_vms | length }} VM{{ 's' if load_test.failed_vms | length != 1 else '' }} failed to send heartbeats within the expected window, indicating a potential BGP route convergence issue.
+                </div>
+                {% endif %}
             {% endif %}
         </div>
         {% if load_test.status == 'failed' and load_test.failed_vms %}
@@ -401,6 +579,7 @@
         {% endif %}
     </div>
 
+    {# --- Instance table --- #}
     {% if instances %}
     <table>
         <thead>
@@ -409,17 +588,18 @@
                 <th>Availability Zone</th>
                 <th>VM Type</th>
                 <th>Hostname</th>
-                <th>Instance ID</th>
                 <th>IP Address</th>
                 <th>Last Seen</th>
             </tr>
         </thead>
         <tbody>
             {% for instance in instances %}
-            <tr class="{{ 'stale' if instance.is_stale else '' }}">
+            <tr class="{{ 'stale' if instance.is_stale else ('warning' if instance.is_warning else '') }}">
                 <td>
                     {% if instance.is_stale %}
-                    <span class="status-badge status-stale">STALE</span>
+                    <span class="status-badge status-stale">UNRESPONSIVE</span>
+                    {% elif instance.is_warning %}
+                    <span class="status-badge status-warning">WARNING</span>
                     {% else %}
                     <span class="status-badge status-healthy">HEALTHY</span>
                     {% endif %}
@@ -429,9 +609,8 @@
                     <span class="vm-type vm-type-{{ instance.vm_type }}">{{ instance.vm_type | upper }}</span>
                 </td>
                 <td>{{ instance.hostname }}</td>
-                <td><code>{{ instance.instance_id[:8] }}...</code></td>
-                <td>{{ instance.ip_address }}</td>
-                <td>{{ instance.seconds_ago }}s ago</td>
+                <td class="ip-muted">{{ instance.ip_address }}</td>
+                <td class="{{ 'last-seen-warning' if instance.is_warning else '' }}">{{ instance.seconds_ago }}s ago</td>
             </tr>
             {% endfor %}
         </tbody>
@@ -446,11 +625,17 @@
         Page auto-refreshes every 30 seconds
     </div>
 
-    <div class="actions">
-        <button class="btn-clear" onclick="clearState()">Clear All State</button>
+    <div class="admin-section">
+        <button class="admin-toggle" onclick="toggleAdmin()">Admin</button>
+        <div class="admin-actions" id="adminActions">
+            <button class="btn-clear" onclick="clearState()">Reset Dashboard (removes all heartbeat history)</button>
+        </div>
     </div>
 
     <script>
+    function toggleAdmin() {
+        document.getElementById('adminActions').classList.toggle('open');
+    }
     function clearState() {
         if (!confirm('Clear all heartbeat state? This cannot be undone.')) return;
         fetch('/clear', { method: 'POST' })
