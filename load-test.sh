@@ -18,12 +18,19 @@
 
 set -uo pipefail
 
+# Source local configuration (API keys, etc.)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=local-config.env
+source "${SCRIPT_DIR}/local-config.env"
+
 # Configuration
 IMAGE="fedora-43"
 FLAVOR="minimal"
 KEYPAIR="aaustin-key"
-DASHBOARD_API_URL="https://snat-heartbeat.apps.lab-hub.lab.signal9.gg/api/instances"
-DASHBOARD_STATUS_URL="https://snat-heartbeat.apps.lab-hub.lab.signal9.gg/api/load-test/status"
+DASHBOARD_URL="https://snat-heartbeat.apps.lab-hub.lab.signal9.gg"
+DASHBOARD_API_URL="${DASHBOARD_URL}/api/instances"
+DASHBOARD_STATUS_URL="${DASHBOARD_URL}/api/load-test/status"
+DASHBOARD_API_KEY="${DASHBOARD_API_KEY:?DASHBOARD_API_KEY must be set}"
 USERDATA_FILE="./agent/cloud-init-userdata.yaml"
 DNS_NAMESERVER="172.18.42.10"
 EPHEMERAL_STALE_THRESHOLD=180  # 3 minutes (for validation)
@@ -111,6 +118,12 @@ if [[ ! -f "$USERDATA_FILE" ]]; then
     exit 1
 fi
 
+# Template the API key into userdata for VM cloud-init
+USERDATA_RENDERED=$(mktemp /tmp/cloud-init-userdata.XXXXXX.yaml)
+trap 'rm -f "$USERDATA_RENDERED"' EXIT
+sed "s|@@DASHBOARD_API_KEY@@|${DASHBOARD_API_KEY}|g" "$USERDATA_FILE" > "$USERDATA_RENDERED"
+USERDATA_FILE="$USERDATA_RENDERED"
+
 # In network mode, verify OVN NB pod is reachable
 if [[ "$TEST_MODE" == "network" ]]; then
     echo "Verifying OVN NB pod ($NBCTL_POD) is reachable..."
@@ -127,9 +140,10 @@ fi
 
 report_status() {
     local status="$1"
-    local iteration="${2:-$ITERATION}"
-    local max_iter="${3:-$MAX_ITERATIONS}"
-    shift 3 2>/dev/null || true
+    local phase="${2:-}"
+    local iteration="${3:-$ITERATION}"
+    local max_iter="${4:-$MAX_ITERATIONS}"
+    shift 4 2>/dev/null || true
     local failed_vms=("$@")
 
     local vms_json="[]"
@@ -140,12 +154,15 @@ report_status() {
     local json
     json=$(jq -n \
         --arg status "$status" \
+        --arg phase "$phase" \
+        --arg test_mode "$TEST_MODE" \
         --argjson iteration "$iteration" \
         --argjson max_iterations "$max_iter" \
         --argjson failed_vms "$vms_json" \
-        '{status: $status, iteration: $iteration, max_iterations: $max_iterations, failed_vms: $failed_vms}')
+        '{status: $status, phase: $phase, test_mode: $test_mode, iteration: $iteration, max_iterations: $max_iterations, failed_vms: $failed_vms}')
 
     curl -s -k -X POST -H 'Content-Type: application/json' \
+        -H "X-API-Key: ${DASHBOARD_API_KEY}" \
         -d "$json" "$DASHBOARD_STATUS_URL" >/dev/null 2>&1 || true
 }
 
@@ -294,14 +311,80 @@ cleanup_iteration_networks() {
     echo "Network cleanup complete"
 }
 
+# --- Stale Route Check (network mode only) ---
+# One networker node per AZ to check for stale routes
+NETWORKER_NODES=(
+    "172.18.158.8"    # az1-networker-0
+    "172.18.158.74"   # az2-networker-0
+    "172.18.158.136"  # az3-networker-0
+)
+NETWORKER_NAMES=(
+    "az1-networker-0"
+    "az2-networker-0"
+    "az3-networker-0"
+)
+SUBNET_POOL_PREFIX="10.42."
+SSH_KEY="$HOME/oso-ssh"
+
+check_stale_routes() {
+    echo ""
+    echo "=== Checking for stale routes (subnet pool prefix ${SUBNET_POOL_PREFIX}0.0/16) ==="
+
+    local found_stale=false
+
+    for i in "${!NETWORKER_NODES[@]}"; do
+        local node_ip="${NETWORKER_NODES[$i]}"
+        local node_name="${NETWORKER_NAMES[$i]}"
+
+        echo "  Checking $node_name ($node_ip)..."
+        local routes
+        routes=$(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+            "cloud-admin@${node_ip}" \
+            "sudo ip route show vrf vrf-100" 2>/dev/null | grep "$SUBNET_POOL_PREFIX" || true)
+
+        if [[ -n "$routes" ]]; then
+            echo "  STALE ROUTES FOUND on $node_name:"
+            echo "$routes" | sed 's/^/    /'
+            found_stale=true
+        else
+            echo "  $node_name: clean"
+        fi
+    done
+
+    if [[ "$found_stale" == "true" ]]; then
+        echo ""
+        echo "ERROR: Stale routes detected using the evpn-100 subnet pool prefix (${SUBNET_POOL_PREFIX}0.0/16)."
+        echo "Please ensure there are no manually-created subnets using the evpn-100 subnet pool,"
+        echo "then clean up stale routes before running the network-mode load test."
+        echo "See CLAUDE_TROUBLESHOOTING.md for stale route cleanup procedures."
+        return 1
+    fi
+
+    echo "  No stale routes found"
+    return 0
+}
+
 # Track created resources for cleanup
 declare -a CREATED_SERVERS
 declare -a CREATED_FIPS
 declare -a CREATED_PORTS
 
+clear_dashboard_instances() {
+    local prefix="$1"
+    echo "Clearing dashboard instances matching prefix: $prefix"
+    local result
+    result=$(curl -s -k -X DELETE -H "X-API-Key: ${DASHBOARD_API_KEY}" "${DASHBOARD_API_URL}?hostname_prefix=${prefix}" 2>/dev/null) || true
+    local count
+    count=$(echo "$result" | jq -r '.removed_count // 0' 2>/dev/null) || count=0
+    echo "Removed $count instances from dashboard"
+}
+
 cleanup_iteration() {
     echo ""
     echo "=== Cleaning up iteration resources ==="
+
+    # Clear ephemeral instances from dashboard before deleting VMs
+    clear_dashboard_instances "load-"
 
     # Delete floating IPs
     for fip_id in "${CREATED_FIPS[@]}"; do
@@ -365,7 +448,7 @@ cleanup_on_exit() {
 }
 
 # Cleanup on Ctrl+C (SIGINT) - always cleanup on interrupt
-trap 'report_status "idle"; CLEANUP_ON_EXIT=true; cleanup_on_exit; exit 130' INT
+trap 'report_status "idle" ""; CLEANUP_ON_EXIT=true; cleanup_on_exit; exit 130' INT
 
 # On normal exit, use the CLEANUP_ON_EXIT flag
 trap cleanup_on_exit EXIT
@@ -555,7 +638,6 @@ run_iteration() {
     echo "========================================"
     echo "Starting iteration $ITERATION at $(date) [mode: $TEST_MODE]"
     echo "========================================"
-    report_status "running" "$ITERATION" "$MAX_ITERATIONS"
 
     # Reset tracking arrays
     CREATED_SERVERS=()
@@ -568,12 +650,22 @@ run_iteration() {
 
     if [[ "$TEST_MODE" == "workload" ]]; then
         # Workload mode: pick random auto-test networks
+        report_status "running" "selecting_networks" "$ITERATION" "$MAX_ITERATIONS"
         echo ""
         echo "=== Step 1: Selecting random networks ==="
         ITERATION_NETWORK_IDS=($(shuf -i 1-150 -n "$NUM_NETWORKS" | sort -n))
         echo "Selected networks: ${ITERATION_NETWORK_IDS[*]}"
     else
+        # Network mode: check for stale routes before proceeding
+        report_status "running" "stale_route_check" "$ITERATION" "$MAX_ITERATIONS"
+        if ! check_stale_routes; then
+            FAILED_VMS=("stale-routes-detected")
+            report_status "failed" "stale_route_check" "$ITERATION" "$MAX_ITERATIONS" "${FAILED_VMS[@]}"
+            return 1
+        fi
+
         # Network mode: create fresh networks
+        report_status "running" "creating_networks" "$ITERATION" "$MAX_ITERATIONS"
         if ! create_iteration_networks; then
             echo "ERROR: Failed to create iteration networks"
             return 1
@@ -582,6 +674,7 @@ run_iteration() {
     fi
 
     # Create instances on selected/created networks
+    report_status "running" "creating_vms" "$ITERATION" "$MAX_ITERATIONS"
     echo ""
     echo "=== Creating instances ==="
 
@@ -593,11 +686,13 @@ run_iteration() {
     echo "Created ${#CREATED_SERVERS[@]} servers, ${#CREATED_FIPS[@]} floating IPs"
 
     # Wait for instances to boot
+    report_status "running" "booting" "$ITERATION" "$MAX_ITERATIONS"
     echo ""
     echo "=== Waiting for instances to boot (60s) ==="
     sleep 60
 
     # Wait then validate
+    report_status "running" "waiting" "$ITERATION" "$MAX_ITERATIONS"
     echo ""
     echo "=== Waiting $WAIT_TIME seconds before validation ==="
     REMAINING=$WAIT_TIME
@@ -608,6 +703,7 @@ run_iteration() {
     done
     echo ""
 
+    report_status "running" "validating" "$ITERATION" "$MAX_ITERATIONS"
     echo ""
     echo "=== Validation ==="
 
@@ -623,7 +719,7 @@ run_iteration() {
                 [[ -n "$vm" ]] && FAILED_VMS+=("$vm")
             done < <(echo "$RESPONSE" | jq -r '.instances[] | select(.hostname | startswith("test-")) | select(.is_stale == true) | .hostname')
         fi
-        report_status "failed" "$ITERATION" "$MAX_ITERATIONS" "${FAILED_VMS[@]}"
+        report_status "failed" "validating" "$ITERATION" "$MAX_ITERATIONS" "${FAILED_VMS[@]}"
         return 1
     fi
 
@@ -633,7 +729,7 @@ run_iteration() {
         echo ""
         echo "!!! TEST FAILED: Ephemeral instance validation failed !!!"
         collect_failed_vms FAILED_VMS
-        report_status "failed" "$ITERATION" "$MAX_ITERATIONS" "${FAILED_VMS[@]}"
+        report_status "failed" "validating" "$ITERATION" "$MAX_ITERATIONS" "${FAILED_VMS[@]}"
         return 1
     fi
 
@@ -641,6 +737,7 @@ run_iteration() {
     echo "=== Iteration $ITERATION PASSED ==="
 
     # Cleanup on success
+    report_status "running" "cleanup" "$ITERATION" "$MAX_ITERATIONS"
     CLEANUP_ON_EXIT=true
     cleanup_iteration
     CLEANUP_ON_EXIT=false
@@ -706,7 +803,7 @@ while true; do
         echo "LOAD TEST COMPLETED: $ITERATION iterations successful"
         echo "Time: $(date)"
         echo "========================================"
-        report_status "completed" "$ITERATION" "$MAX_ITERATIONS"
+        report_status "completed" "" "$ITERATION" "$MAX_ITERATIONS"
         CLEANUP_ON_EXIT=true
         exit 0
     fi

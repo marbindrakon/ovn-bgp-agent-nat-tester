@@ -394,50 +394,6 @@
             font-size: 0.85em;
         }
 
-        /* Admin section */
-        .admin-section {
-            text-align: center;
-            margin-top: 15px;
-        }
-
-        .admin-toggle {
-            background: none;
-            border: 1px solid #333;
-            color: #666;
-            padding: 6px 16px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 0.8em;
-        }
-
-        .admin-toggle:hover {
-            border-color: #555;
-            color: #888;
-        }
-
-        .admin-actions {
-            display: none;
-            margin-top: 10px;
-        }
-
-        .admin-actions.open {
-            display: block;
-        }
-
-        .btn-clear {
-            background: #ff475730;
-            color: #ff4757;
-            border: 1px solid #ff475750;
-            padding: 8px 20px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 0.85em;
-            font-weight: 600;
-        }
-
-        .btn-clear:hover {
-            background: #ff475750;
-        }
     </style>
 </head>
 <body>
@@ -625,23 +581,5 @@
         Page auto-refreshes every 30 seconds
     </div>
 
-    <div class="admin-section">
-        <button class="admin-toggle" onclick="toggleAdmin()">Admin</button>
-        <div class="admin-actions" id="adminActions">
-            <button class="btn-clear" onclick="clearState()">Reset Dashboard (removes all heartbeat history)</button>
-        </div>
-    </div>
-
-    <script>
-    function toggleAdmin() {
-        document.getElementById('adminActions').classList.toggle('open');
-    }
-    function clearState() {
-        if (!confirm('Clear all heartbeat state? This cannot be undone.')) return;
-        fetch('/clear', { method: 'POST' })
-            .then(r => { if (r.ok) location.reload(); else alert('Failed to clear state'); })
-            .catch(() => alert('Failed to clear state'));
-    }
-    </script>
 </body>
 </html>

@@ -49,3 +49,6 @@ ansible-inventory
 
 # Node access reference (contains infrastructure IPs)
 NODE_ACCESS.md
+
+# Local configuration (contains API keys)
+local-config.env

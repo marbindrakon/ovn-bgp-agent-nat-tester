@@ -6,6 +6,7 @@
 #
 
 DASHBOARD_URL="https://snat-heartbeat.apps.lab-hub.lab.signal9.gg/heartbeat"
+DASHBOARD_API_KEY="${DASHBOARD_API_KEY:-}"
 HEARTBEAT_INTERVAL=60
 
 # Get instance metadata from OpenStack metadata service
@@ -54,6 +55,7 @@ EOF
 
     RESPONSE=$(curl -s -X POST \
         -H "Content-Type: application/json" \
+        -H "X-API-Key: ${DASHBOARD_API_KEY}" \
         -d "$PAYLOAD" \
         --connect-timeout 10 \
         --max-time 30 \

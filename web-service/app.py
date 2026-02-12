@@ -8,19 +8,65 @@ Ephemeral instances (load-*) are automatically cleaned up after 10 minutes of no
 
 import json
 import os
+from functools import wraps
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 1 * 1024 * 1024  # 1 MB
 
 # Threshold for stale instances
 PERMANENT_STALE_THRESHOLD_SECONDS = 300  # 5 minutes
 EPHEMERAL_STALE_THRESHOLD_SECONDS = 180  # 3 minutes
 EPHEMERAL_CLEANUP_THRESHOLD_SECONDS = 600  # 10 minutes
 
+# API key for mutating endpoints (read from environment)
+API_KEY = os.environ.get('API_KEY', '')
+
+# Instance limits
+MAX_INSTANCES = 500
+MAX_FIELD_LENGTHS = {
+    'instance_id': 64,
+    'hostname': 128,
+    'ip_address': 45,
+    'availability_zone': 64,
+    'vm_type': 32,
+}
+
 # State file path
 STATE_FILE = os.environ.get('STATE_FILE', '/tmp/heartbeat-state.json')
 LOAD_TEST_STATUS_FILE = os.environ.get('LOAD_TEST_STATUS_FILE', '/tmp/load-test-status.json')
+
+
+def require_api_key(f):
+    """Decorator that rejects requests without a valid X-API-Key header."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not API_KEY:
+            app.logger.warning("API_KEY not configured — mutating endpoint is unprotected")
+            return f(*args, **kwargs)
+        key = request.headers.get('X-API-Key', '')
+        if key != API_KEY:
+            return jsonify({'error': 'unauthorized'}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+def truncate_field(value, field_name):
+    """Truncate a string field to its maximum allowed length."""
+    max_len = MAX_FIELD_LENGTHS.get(field_name)
+    if max_len and isinstance(value, str) and len(value) > max_len:
+        return value[:max_len]
+    return value
+
+
+@app.after_request
+def set_security_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Content-Security-Policy'] = "default-src 'self'; style-src 'unsafe-inline' 'self'; script-src 'unsafe-inline' 'self'"
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    return response
 
 
 def get_instance_type(hostname):
@@ -106,6 +152,7 @@ def healthz():
 
 
 @app.route('/heartbeat', methods=['POST'])
+@require_api_key
 def heartbeat():
     """Receive heartbeat from an instance."""
     data = request.get_json() or {}
@@ -114,19 +161,25 @@ def heartbeat():
     if not instance_id:
         return jsonify({'error': 'instance_id required'}), 400
 
+    instance_id = truncate_field(instance_id, 'instance_id')
+
     # Load current state from file
     instances = load_state()
 
+    # Reject new instances if at capacity
+    if instance_id not in instances and len(instances) >= MAX_INSTANCES:
+        return jsonify({'error': 'instance limit reached'}), 429
+
     now = datetime.utcnow()
-    hostname = data.get('hostname', 'unknown')
+    hostname = truncate_field(data.get('hostname', 'unknown'), 'hostname')
     instance_type = get_instance_type(hostname)
 
     instances[instance_id] = {
         'instance_id': instance_id,
         'hostname': hostname,
-        'ip_address': data.get('ip_address', request.remote_addr),
-        'availability_zone': data.get('availability_zone', 'unknown'),
-        'vm_type': data.get('vm_type', 'unknown'),
+        'ip_address': truncate_field(data.get('ip_address', request.remote_addr), 'ip_address'),
+        'availability_zone': truncate_field(data.get('availability_zone', 'unknown'), 'availability_zone'),
+        'vm_type': truncate_field(data.get('vm_type', 'unknown'), 'vm_type'),
         'instance_type': instance_type,
         'last_seen': now,
         'first_seen': instances.get(instance_id, {}).get('first_seen', now),
@@ -192,6 +245,7 @@ def dashboard():
 
 
 @app.route('/clear', methods=['POST'])
+@require_api_key
 def clear_state():
     """Clear all heartbeat state."""
     try:
@@ -202,6 +256,32 @@ def clear_state():
     except IOError as e:
         app.logger.error(f"Failed to clear state file: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/instances', methods=['DELETE'])
+@require_api_key
+def delete_instances():
+    """Remove instances matching a hostname prefix.
+
+    Query parameters:
+      hostname_prefix: Remove instances whose hostname starts with this string (required)
+    """
+    hostname_prefix = request.args.get('hostname_prefix')
+    if not hostname_prefix:
+        return jsonify({'error': 'hostname_prefix query parameter required'}), 400
+
+    instances = load_state()
+    removed = []
+    kept = {}
+    for instance_id, data in instances.items():
+        if data.get('hostname', '').startswith(hostname_prefix):
+            removed.append(data.get('hostname', instance_id))
+        else:
+            kept[instance_id] = data
+
+    save_state(kept)
+    app.logger.info(f"Removed {len(removed)} instances matching prefix '{hostname_prefix}': {removed}")
+    return jsonify({'status': 'ok', 'removed_count': len(removed), 'removed': removed}), 200
 
 
 @app.route('/api/instances')
@@ -306,6 +386,7 @@ def get_load_test_status():
 
 
 @app.route('/api/load-test/status', methods=['POST'])
+@require_api_key
 def update_load_test_status():
     """Update the load test status.
 

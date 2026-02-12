@@ -8,6 +8,11 @@
 
 set -euo pipefail
 
+# Source local configuration (API keys, etc.)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=local-config.env
+source "${SCRIPT_DIR}/local-config.env"
+
 # Configuration
 EXTERNAL_NETWORK="evpn-external"
 IMAGE="fedora-43"
@@ -40,8 +45,6 @@ OVN_CERT="/etc/pki/tls/certs/ovndb.crt"
 OVN_KEY="/etc/pki/tls/private/ovndb.key"
 OVN_CA="/etc/pki/tls/certs/ovndbca.crt"
 
-# Get the directory where this script is located
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 USERDATA_FILE="${SCRIPT_DIR}/agent/cloud-init-userdata.yaml"
 
 # Parse command line arguments
@@ -186,6 +189,13 @@ if [[ ! -f "$USERDATA_FILE" ]]; then
     echo "ERROR: Cloud-init userdata file not found: $USERDATA_FILE"
     exit 1
 fi
+
+# Template the API key into userdata for VM cloud-init
+DASHBOARD_API_KEY="${DASHBOARD_API_KEY:?DASHBOARD_API_KEY must be set}"
+USERDATA_RENDERED=$(mktemp /tmp/cloud-init-userdata.XXXXXX.yaml)
+trap 'rm -f "$USERDATA_RENDERED"' EXIT
+sed "s|@@DASHBOARD_API_KEY@@|${DASHBOARD_API_KEY}|g" "$USERDATA_FILE" > "$USERDATA_RENDERED"
+USERDATA_FILE="$USERDATA_RENDERED"
 
 echo "=== OpenStack Test Infrastructure Setup ==="
 echo "Using cloud-init userdata: $USERDATA_FILE"
