@@ -383,9 +383,6 @@ cleanup_iteration() {
     echo ""
     echo "=== Cleaning up iteration resources ==="
 
-    # Clear ephemeral instances from dashboard before deleting VMs
-    clear_dashboard_instances "load-"
-
     # Delete floating IPs
     for fip_id in "${CREATED_FIPS[@]}"; do
         echo "Deleting floating IP: $fip_id"
@@ -411,6 +408,9 @@ cleanup_iteration() {
         echo "Deleting port: $port"
         openstack port delete "$port" 2>/dev/null || true
     done
+
+    # Clear ephemeral instances from dashboard after deleting VMs, so they don't look like false failures
+    clear_dashboard_instances "load-"
 
     # Reset arrays
     CREATED_SERVERS=()
