@@ -36,6 +36,8 @@ MAX_FIELD_LENGTHS = {
 # State file path
 STATE_FILE = os.environ.get('STATE_FILE', '/tmp/heartbeat-state.json')
 LOAD_TEST_STATUS_FILE = os.environ.get('LOAD_TEST_STATUS_FILE', '/tmp/load-test-status.json')
+LOAD_TEST_HISTORY_FILE = os.environ.get('LOAD_TEST_HISTORY_FILE', '/tmp/load-test-history.json')
+MAX_HISTORY_ENTRIES = 5
 
 
 def require_api_key(f):
@@ -229,6 +231,7 @@ def dashboard():
     ephemeral = [i for i in instance_list if i['instance_type'] == 'ephemeral']
 
     lt_status = load_test_status()
+    test_history = load_test_history()
 
     return render_template('dashboard.html',
                           instances=instance_list,
@@ -241,7 +244,8 @@ def dashboard():
                           eph_total=len(ephemeral),
                           eph_healthy=sum(1 for i in ephemeral if not i['is_stale']),
                           eph_stale=sum(1 for i in ephemeral if i['is_stale']),
-                          load_test=lt_status)
+                          load_test=lt_status,
+                          test_history=test_history)
 
 
 @app.route('/clear', methods=['POST'])
@@ -345,11 +349,6 @@ def load_test_status():
         try:
             with open(LOAD_TEST_STATUS_FILE, 'r') as f:
                 data = json.load(f)
-                # Auto-expire: if last update was >15 minutes ago, treat as idle
-                if data.get('updated_at'):
-                    updated = datetime.fromisoformat(data['updated_at'])
-                    if (datetime.utcnow() - updated).total_seconds() > 900:
-                        return default
                 merged = {**default, **data}
                 # Compute elapsed seconds
                 if merged.get('started_at'):
@@ -379,6 +378,29 @@ def save_test_status(data):
         app.logger.error(f"Failed to save load test status: {e}")
 
 
+def load_test_history():
+    """Load the test run history from file."""
+    if os.path.exists(LOAD_TEST_HISTORY_FILE):
+        try:
+            with open(LOAD_TEST_HISTORY_FILE, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return []
+
+
+def save_to_test_history(entry):
+    """Prepend a completed/failed test run to the history file (max 5 entries)."""
+    history = load_test_history()
+    history.insert(0, entry)
+    history = history[:MAX_HISTORY_ENTRIES]
+    try:
+        with open(LOAD_TEST_HISTORY_FILE, 'w') as f:
+            json.dump(history, f, indent=2)
+    except IOError as e:
+        app.logger.error(f"Failed to save test history: {e}")
+
+
 @app.route('/api/load-test/status', methods=['GET'])
 def get_load_test_status():
     """Get the current load test status."""
@@ -402,6 +424,7 @@ def update_load_test_status():
         return jsonify({'error': 'status must be running, completed, failed, or idle'}), 400
 
     current = load_test_status()
+    previous_status = current.get('status')
 
     current['status'] = status
     if 'iteration' in data:
@@ -413,6 +436,30 @@ def update_load_test_status():
         current['phase'] = data['phase']
     if 'test_mode' in data:
         current['test_mode'] = data['test_mode']
+
+    # Save to history when a test completes, fails, or is cancelled (idle while running)
+    history_status = None
+    if status in ('completed', 'failed'):
+        history_status = status
+    elif status == 'idle' and previous_status == 'running':
+        history_status = 'cancelled'
+
+    if history_status:
+        elapsed = 0
+        if current.get('started_at'):
+            start = datetime.fromisoformat(current['started_at'])
+            elapsed = int((datetime.utcnow() - start).total_seconds())
+        save_to_test_history({
+            'status': history_status,
+            'test_mode': current.get('test_mode', ''),
+            'iteration': current.get('iteration', 0),
+            'max_iterations': current.get('max_iterations', 0),
+            'started_at': current.get('started_at', ''),
+            'finished_at': datetime.utcnow().isoformat(),
+            'elapsed_seconds': elapsed,
+            'failed_vms': current.get('failed_vms', []),
+            'phase': current.get('phase', ''),
+        })
 
     if status == 'running':
         if not current.get('started_at'):
@@ -428,6 +475,7 @@ def update_load_test_status():
         current['test_mode'] = ''
 
     save_test_status(current)
+
     return jsonify({'status': 'ok'}), 200
 
 

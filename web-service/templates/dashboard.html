@@ -380,6 +380,73 @@
             color: #fbbf24;
         }
 
+        /* Test history */
+        .test-history {
+            margin-bottom: 30px;
+            background: #16213e;
+            border-radius: 10px;
+            padding: 20px 30px;
+        }
+
+        .test-history h2 {
+            font-size: 1.1em;
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: #888;
+        }
+
+        .history-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: transparent;
+        }
+
+        .history-table th {
+            background: #0f1a2e;
+            color: #888;
+            font-size: 0.75em;
+            padding: 8px 12px;
+        }
+
+        .history-table td {
+            padding: 8px 12px;
+            font-size: 0.85em;
+            color: #aaa;
+            border-bottom: 1px solid #0f1a2e;
+        }
+
+        .history-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .history-table tr:hover {
+            background: #1a2a3e;
+        }
+
+        .hist-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 0.8em;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .hist-badge-completed {
+            background: #00d4ff20;
+            color: #00d4ff;
+        }
+
+        .hist-badge-failed {
+            background: #ff475720;
+            color: #ff4757;
+        }
+
+        .hist-badge-cancelled {
+            background: #f59e0b20;
+            color: #fbbf24;
+        }
+
         .no-instances {
             text-align: center;
             padding: 50px;
@@ -534,6 +601,55 @@
         </div>
         {% endif %}
     </div>
+
+    {# --- Test history --- #}
+    {% if test_history %}
+    <div class="test-history">
+        <h2>Recent Test Runs</h2>
+        <table class="history-table">
+            <thead>
+                <tr>
+                    <th>Status</th>
+                    <th>Mode</th>
+                    <th>Iterations</th>
+                    <th>Duration</th>
+                    <th>Finished</th>
+                    <th>Failed VMs</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for run in test_history %}
+                <tr>
+                    <td><span class="hist-badge hist-badge-{{ run.status }}">{{ run.status }}</span></td>
+                    <td>{{ run.test_mode or '—' }}</td>
+                    <td>{{ run.iteration }}{% if run.max_iterations > 0 %}/{{ run.max_iterations }}{% endif %}</td>
+                    <td>
+                        {% if run.elapsed_seconds %}
+                            {{ (run.elapsed_seconds // 3600) }}h {{ '%02d' | format((run.elapsed_seconds % 3600) // 60) }}m
+                        {% else %}
+                            —
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if run.finished_at %}
+                            {{ run.finished_at[:16] | replace('T', ' ') }} UTC
+                        {% else %}
+                            —
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if run.failed_vms %}
+                            <span style="color: #ff4757;">{{ run.failed_vms | length }}</span>
+                        {% else %}
+                            0
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
 
     {# --- Instance table --- #}
     {% if instances %}
