@@ -2,8 +2,8 @@
 """
 SNAT Test Heartbeat Dashboard
 Receives heartbeats from test instances and displays their status.
-Permanent instances (test-*) are never removed from the state file.
-Ephemeral instances (load-*) are automatically cleaned up after 10 minutes of no heartbeat.
+Instances are never automatically removed; use the cleanup scripts or
+DELETE /api/instances?hostname_prefix=... to remove them explicitly.
 """
 
 import json
@@ -15,22 +15,23 @@ from flask import Flask, request, jsonify, render_template
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 1 * 1024 * 1024  # 1 MB
 
-# Threshold for stale instances
-PERMANENT_STALE_THRESHOLD_SECONDS = 300  # 5 minutes
-EPHEMERAL_STALE_THRESHOLD_SECONDS = 180  # 3 minutes
-EPHEMERAL_CLEANUP_THRESHOLD_SECONDS = 600  # 10 minutes
+# Stale thresholds — scaled for 10s heartbeat interval
+PERMANENT_STALE_THRESHOLD_SECONDS = 60   # 6 missed heartbeats
+EPHEMERAL_STALE_THRESHOLD_SECONDS = 30   # 3 missed heartbeats
 
 # API key for mutating endpoints (read from environment)
 API_KEY = os.environ.get('API_KEY', '')
 
 # Instance limits
 MAX_INSTANCES = 500
+MAX_RECENT_FAILURES = 20
 MAX_FIELD_LENGTHS = {
     'instance_id': 64,
     'hostname': 128,
     'ip_address': 45,
     'availability_zone': 64,
     'vm_type': 32,
+    'failure_reason': 256,
 }
 
 # State file path
@@ -88,29 +89,15 @@ def get_stale_threshold(instance_type):
 
 
 def load_state():
-    """Load state from JSON file and return instances dict.
-    Filters out expired ephemeral instances during load.
-    """
+    """Load state from JSON file and return instances dict."""
     instances = {}
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, 'r') as f:
                 data = json.load(f)
-                now = datetime.utcnow()
-                cleanup_threshold = timedelta(seconds=EPHEMERAL_CLEANUP_THRESHOLD_SECONDS)
-
                 for instance_id, instance_data in data.items():
                     instance_data['last_seen'] = datetime.fromisoformat(instance_data['last_seen'])
                     instance_data['first_seen'] = datetime.fromisoformat(instance_data['first_seen'])
-
-                    # Filter out expired ephemeral instances
-                    instance_type = get_instance_type(instance_data.get('hostname', ''))
-                    if instance_type == 'ephemeral':
-                        time_since_last_seen = now - instance_data['last_seen']
-                        if time_since_last_seen > cleanup_threshold:
-                            app.logger.info(f"Filtered expired ephemeral instance: {instance_data.get('hostname')} (last seen {time_since_last_seen.total_seconds()}s ago)")
-                            continue
-
                     instances[instance_id] = instance_data
         except (json.JSONDecodeError, KeyError, ValueError, IOError) as e:
             app.logger.warning(f"Failed to load state file: {e}")
@@ -118,33 +105,37 @@ def load_state():
 
 
 def save_state(instances):
-    """Save state to JSON file.
-    Cleans up expired ephemeral instances before saving.
-    """
+    """Save state to JSON file."""
     try:
-        now = datetime.utcnow()
-        cleanup_threshold = timedelta(seconds=EPHEMERAL_CLEANUP_THRESHOLD_SECONDS)
         data = {}
-
         for instance_id, instance_data in instances.items():
-            # Filter out expired ephemeral instances
-            instance_type = get_instance_type(instance_data.get('hostname', ''))
-            if instance_type == 'ephemeral':
-                time_since_last_seen = now - instance_data['last_seen']
-                if time_since_last_seen > cleanup_threshold:
-                    app.logger.info(f"Cleaned up expired ephemeral instance: {instance_data.get('hostname')} (last seen {time_since_last_seen.total_seconds()}s ago)")
-                    continue
-
             data[instance_id] = {
                 **instance_data,
                 'last_seen': instance_data['last_seen'].isoformat(),
                 'first_seen': instance_data['first_seen'].isoformat(),
             }
-
         with open(STATE_FILE, 'w') as f:
             json.dump(data, f, indent=2)
     except IOError as e:
         app.logger.error(f"Failed to save state file: {e}")
+
+
+def sanitize_recent_failures(raw):
+    """Validate and sanitize recent_failures list from agent payload."""
+    if not isinstance(raw, list):
+        return []
+    result = []
+    for entry in raw[:MAX_RECENT_FAILURES]:
+        if not isinstance(entry, dict):
+            continue
+        ts = entry.get('timestamp', '')
+        reason = entry.get('reason', '')
+        if isinstance(ts, str) and isinstance(reason, str):
+            result.append({
+                'timestamp': ts[:32],
+                'reason': reason[:MAX_FIELD_LENGTHS['failure_reason']],
+            })
+    return result
 
 
 @app.route('/healthz')
@@ -165,16 +156,16 @@ def heartbeat():
 
     instance_id = truncate_field(instance_id, 'instance_id')
 
-    # Load current state from file
     instances = load_state()
 
-    # Reject new instances if at capacity
     if instance_id not in instances and len(instances) >= MAX_INSTANCES:
         return jsonify({'error': 'instance limit reached'}), 429
 
     now = datetime.utcnow()
     hostname = truncate_field(data.get('hostname', 'unknown'), 'hostname')
     instance_type = get_instance_type(hostname)
+
+    existing = instances.get(instance_id, {})
 
     instances[instance_id] = {
         'instance_id': instance_id,
@@ -184,47 +175,50 @@ def heartbeat():
         'vm_type': truncate_field(data.get('vm_type', 'unknown'), 'vm_type'),
         'instance_type': instance_type,
         'last_seen': now,
-        'first_seen': instances.get(instance_id, {}).get('first_seen', now),
+        'first_seen': existing.get('first_seen', now),
+        'failure_count': int(data['failure_count']) if isinstance(data.get('failure_count'), (int, float)) else 0,
+        'recent_failures': sanitize_recent_failures(data.get('recent_failures', [])),
     }
 
-    # Save updated state to file
     save_state(instances)
 
     return jsonify({'status': 'ok', 'timestamp': now.isoformat()}), 200
 
 
+def _build_instance_view(instance_id, data, now):
+    """Build the dict representation of an instance for API/dashboard use."""
+    instance_type = data.get('instance_type', get_instance_type(data.get('hostname', '')))
+    stale_threshold_seconds = get_stale_threshold(instance_type)
+    stale_threshold = now - timedelta(seconds=stale_threshold_seconds)
+
+    is_stale = data['last_seen'] < stale_threshold
+    seconds_ago = (now - data['last_seen']).total_seconds()
+    is_warning = not is_stale and seconds_ago > (stale_threshold_seconds * 0.5)
+
+    return {
+        'instance_id': instance_id,
+        'hostname': data['hostname'],
+        'ip_address': data['ip_address'],
+        'availability_zone': data['availability_zone'],
+        'vm_type': data['vm_type'],
+        'instance_type': instance_type,
+        'first_seen': data['first_seen'].isoformat(),
+        'last_seen': data['last_seen'].isoformat(),
+        'seconds_ago': int(seconds_ago),
+        'is_stale': is_stale,
+        'is_warning': is_warning,
+        'failure_count': data.get('failure_count', 0),
+        'recent_failures': data.get('recent_failures', []),
+    }
+
+
 @app.route('/')
 def dashboard():
     """Render the dashboard showing instance status."""
-    # Load current state from file
     instances = load_state()
-
     now = datetime.utcnow()
 
-    instance_list = []
-    for instance_id, data in instances.items():
-        instance_type = data.get('instance_type', get_instance_type(data.get('hostname', '')))
-        stale_threshold_seconds = get_stale_threshold(instance_type)
-        stale_threshold = now - timedelta(seconds=stale_threshold_seconds)
-
-        is_stale = data['last_seen'] < stale_threshold
-        seconds_ago = (now - data['last_seen']).total_seconds()
-        is_warning = not is_stale and seconds_ago > (stale_threshold_seconds * 0.5)
-
-        instance_list.append({
-            'instance_id': instance_id,
-            'hostname': data['hostname'],
-            'ip_address': data['ip_address'],
-            'availability_zone': data['availability_zone'],
-            'vm_type': data['vm_type'],
-            'instance_type': instance_type,
-            'last_seen': data['last_seen'].isoformat(),
-            'seconds_ago': int(seconds_ago),
-            'is_stale': is_stale,
-            'is_warning': is_warning,
-        })
-
-    # Sort by availability zone, then by vm_type
+    instance_list = [_build_instance_view(iid, d, now) for iid, d in instances.items()]
     instance_list.sort(key=lambda x: (x['availability_zone'], x['vm_type'], x['instance_id']))
 
     permanent = [i for i in instance_list if i['instance_type'] == 'permanent']
@@ -288,6 +282,17 @@ def delete_instances():
     return jsonify({'status': 'ok', 'removed_count': len(removed), 'removed': removed}), 200
 
 
+@app.route('/api/instances/<instance_id>')
+def get_instance(instance_id):
+    """Return full details for a single instance including failure history."""
+    instances = load_state()
+    data = instances.get(instance_id)
+    if data is None:
+        return jsonify({'error': 'not found'}), 404
+    now = datetime.utcnow()
+    return jsonify(_build_instance_view(instance_id, data, now)), 200
+
+
 @app.route('/api/instances')
 def api_instances():
     """API endpoint returning instance data as JSON.
@@ -295,10 +300,8 @@ def api_instances():
       - type: Filter by instance type (permanent or ephemeral)
       - hostname_prefix: Filter by hostname prefix
     """
-    # Load current state from file
     instances = load_state()
 
-    # Get query parameters
     type_filter = request.args.get('type')
     hostname_prefix = request.args.get('hostname_prefix')
 
@@ -308,29 +311,12 @@ def api_instances():
     for instance_id, data in instances.items():
         instance_type = data.get('instance_type', get_instance_type(data.get('hostname', '')))
 
-        # Apply filters
         if type_filter and instance_type != type_filter:
             continue
         if hostname_prefix and not data.get('hostname', '').startswith(hostname_prefix):
             continue
 
-        stale_threshold_seconds = get_stale_threshold(instance_type)
-        stale_threshold = now - timedelta(seconds=stale_threshold_seconds)
-
-        is_stale = data['last_seen'] < stale_threshold
-        seconds_ago = (now - data['last_seen']).total_seconds()
-
-        instance_list.append({
-            'instance_id': instance_id,
-            'hostname': data['hostname'],
-            'ip_address': data['ip_address'],
-            'availability_zone': data['availability_zone'],
-            'vm_type': data['vm_type'],
-            'instance_type': instance_type,
-            'last_seen': data['last_seen'].isoformat(),
-            'seconds_ago': int(seconds_ago),
-            'is_stale': is_stale,
-        })
+        instance_list.append(_build_instance_view(instance_id, data, now))
 
     return jsonify({
         'instances': instance_list,
@@ -350,7 +336,6 @@ def load_test_status():
             with open(LOAD_TEST_STATUS_FILE, 'r') as f:
                 data = json.load(f)
                 merged = {**default, **data}
-                # Compute elapsed seconds
                 if merged.get('started_at'):
                     start = datetime.fromisoformat(merged['started_at'])
                     if merged['status'] == 'running':
@@ -410,14 +395,7 @@ def get_load_test_status():
 @app.route('/api/load-test/status', methods=['POST'])
 @require_api_key
 def update_load_test_status():
-    """Update the load test status.
-
-    Expected JSON body:
-      status: "running" | "completed" | "failed" | "idle"
-      iteration: current iteration number
-      max_iterations: total planned iterations (0 = unlimited)
-      failed_vms: list of VM names that failed (optional)
-    """
+    """Update the load test status."""
     data = request.get_json() or {}
     status = data.get('status')
     if status not in ('running', 'completed', 'failed', 'idle'):
@@ -431,13 +409,11 @@ def update_load_test_status():
         current['iteration'] = data['iteration']
     if 'max_iterations' in data:
         current['max_iterations'] = data['max_iterations']
-
     if 'phase' in data:
         current['phase'] = data['phase']
     if 'test_mode' in data:
         current['test_mode'] = data['test_mode']
 
-    # Save to history when a test completes, fails, or is cancelled (idle while running)
     history_status = None
     if status in ('completed', 'failed'):
         history_status = status
@@ -462,9 +438,8 @@ def update_load_test_status():
         })
 
     if status == 'running':
-        if not current.get('started_at'):
+        if previous_status != 'running':
             current['started_at'] = datetime.utcnow().isoformat()
-        # Clear failed VMs when a new iteration starts running
         current['failed_vms'] = []
     elif status == 'failed':
         current['failed_vms'] = data.get('failed_vms', [])

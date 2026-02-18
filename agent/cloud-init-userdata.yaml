@@ -1,72 +1,128 @@
 #cloud-config
 
 write_files:
-  - path: /usr/local/bin/heartbeat-agent.sh
+  - path: /usr/local/bin/heartbeat-agent.py
     permissions: '0755'
     content: |
-      #!/bin/bash
-      #
-      # SNAT Test Heartbeat Agent
-      #
+      #!/usr/bin/env python3
+      """SNAT Test Heartbeat Agent"""
 
-      DASHBOARD_URL="https://snat-heartbeat.apps.lab-hub.lab.signal9.gg/heartbeat"
-      DASHBOARD_API_KEY="@@DASHBOARD_API_KEY@@"
-      HEARTBEAT_INTERVAL=60
+      import json
+      import ssl
+      import subprocess
+      import time
+      import urllib.error
+      import urllib.request
+      from collections import deque
+      from datetime import datetime, timezone
 
-      # Get instance metadata from OpenStack metadata service
-      get_metadata() {
-          curl -s http://169.254.169.254/openstack/latest/meta_data.json 2>/dev/null
-      }
+      DASHBOARD_URL = "https://snat-heartbeat.apps.lab-hub.lab.signal9.gg/heartbeat"
+      DASHBOARD_API_KEY = "@@DASHBOARD_API_KEY@@"
+      HEARTBEAT_INTERVAL = 10
+      MAX_RECENT_FAILURES = 20
 
-      # Extract values from metadata
-      METADATA=$(get_metadata)
-      INSTANCE_ID=$(echo "$METADATA" | python3 -c "import sys,json; print(json.load(sys.stdin).get('uuid','unknown'))" 2>/dev/null || echo "unknown")
-      HOSTNAME=$(echo "$METADATA" | python3 -c "import sys,json; print(json.load(sys.stdin).get('name','unknown'))" 2>/dev/null || hostname)
-      AZ=$(echo "$METADATA" | python3 -c "import sys,json; print(json.load(sys.stdin).get('availability_zone','unknown'))" 2>/dev/null || echo "unknown")
 
-      # Determine VM type from hostname
-      if [[ "$HOSTNAME" == *"-snat-"* ]]; then
-          VM_TYPE="snat"
-      elif [[ "$HOSTNAME" == *"-fip-"* ]]; then
-          VM_TYPE="fip"
-      else
-          VM_TYPE="unknown"
-      fi
+      def get_metadata():
+          try:
+              req = urllib.request.urlopen(
+                  "http://169.254.169.254/openstack/latest/meta_data.json",
+                  timeout=5)
+              return json.loads(req.read())
+          except Exception:
+              return {}
 
-      # Get primary IP address
-      IP_ADDRESS=$(hostname -I | awk '{print $1}')
 
-      echo "Starting heartbeat agent..."
-      echo "  Instance ID: $INSTANCE_ID"
-      echo "  Hostname: $HOSTNAME"
-      echo "  Availability Zone: $AZ"
-      echo "  VM Type: $VM_TYPE"
-      echo "  IP Address: $IP_ADDRESS"
+      def get_primary_ip():
+          try:
+              out = subprocess.run(
+                  ["hostname", "-I"],
+                  capture_output=True, text=True, timeout=5
+              ).stdout.split()
+              return out[0] if out else "unknown"
+          except Exception:
+              return "unknown"
 
-      # Send heartbeats in a loop
-      while true; do
-          PAYLOAD=$(cat <<EOF
-      {
-          "instance_id": "$INSTANCE_ID",
-          "hostname": "$HOSTNAME",
-          "availability_zone": "$AZ",
-          "vm_type": "$VM_TYPE",
-          "ip_address": "$IP_ADDRESS"
-      }
-      EOF
-      )
 
-          curl -s -X POST \
-              -H "Content-Type: application/json" \
-              -H "X-API-Key: ${DASHBOARD_API_KEY}" \
-              -d "$PAYLOAD" \
-              --connect-timeout 10 \
-              --max-time 30 \
-              -k \
-              "$DASHBOARD_URL" 2>&1 || true
+      def main():
+          meta = get_metadata()
+          instance_id = meta.get("uuid", "unknown")
+          hostname = meta.get("name", "unknown")
+          az = meta.get("availability_zone", "unknown")
+          ip_address = get_primary_ip()
 
-          sleep $HEARTBEAT_INTERVAL
-      done
+          if "-snat-" in hostname:
+              vm_type = "snat"
+          elif "-fip-" in hostname:
+              vm_type = "fip"
+          elif "-ext-" in hostname:
+              vm_type = "ext"
+          else:
+              vm_type = "unknown"
+
+          print(f"Starting heartbeat agent")
+          print(f"  Instance ID: {instance_id}")
+          print(f"  Hostname:    {hostname}")
+          print(f"  AZ:          {az}")
+          print(f"  VM Type:     {vm_type}")
+          print(f"  IP Address:  {ip_address}")
+          print(f"  Interval:    {HEARTBEAT_INTERVAL}s")
+
+          ssl_ctx = ssl.create_default_context()
+          ssl_ctx.check_hostname = False
+          ssl_ctx.verify_mode = ssl.CERT_NONE
+
+          failure_count = 0
+          recent_failures = deque(maxlen=MAX_RECENT_FAILURES)
+
+          while True:
+              payload = json.dumps({
+                  "instance_id": instance_id,
+                  "hostname": hostname,
+                  "availability_zone": az,
+                  "vm_type": vm_type,
+                  "ip_address": ip_address,
+                  "failure_count": failure_count,
+                  "recent_failures": list(recent_failures),
+              }).encode()
+
+              try:
+                  req = urllib.request.Request(
+                      DASHBOARD_URL,
+                      data=payload,
+                      headers={
+                          "Content-Type": "application/json",
+                          "X-API-Key": DASHBOARD_API_KEY,
+                      },
+                  )
+                  urllib.request.urlopen(req, timeout=30, context=ssl_ctx)
+              except urllib.error.HTTPError as e:
+                  failure_count += 1
+                  recent_failures.append({
+                      "timestamp": datetime.now(timezone.utc).isoformat(),
+                      "reason": f"HTTP {e.code}: {e.reason}",
+                  })
+                  print(f"Heartbeat failed — HTTP {e.code}: {e.reason}")
+              except urllib.error.URLError as e:
+                  failure_count += 1
+                  reason = str(e.reason) if hasattr(e, "reason") else str(e)
+                  recent_failures.append({
+                      "timestamp": datetime.now(timezone.utc).isoformat(),
+                      "reason": f"URLError: {reason}",
+                  })
+                  print(f"Heartbeat failed — URLError: {reason}")
+              except Exception as e:
+                  failure_count += 1
+                  recent_failures.append({
+                      "timestamp": datetime.now(timezone.utc).isoformat(),
+                      "reason": str(e)[:256],
+                  })
+                  print(f"Heartbeat failed — {e}")
+
+              time.sleep(HEARTBEAT_INTERVAL)
+
+
+      if __name__ == "__main__":
+          main()
 
   - path: /etc/systemd/system/heartbeat-agent.service
     permissions: '0644'
@@ -78,7 +134,7 @@ write_files:
 
       [Service]
       Type=simple
-      ExecStart=/usr/local/bin/heartbeat-agent.sh
+      ExecStart=/usr/local/bin/heartbeat-agent.py
       Restart=always
       RestartSec=10
 

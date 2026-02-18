@@ -200,6 +200,7 @@ create_network_set() {
     openstack subnet create \
         --network "$prefix" \
         --subnet-pool "$AUTO_TEST_SUBNET_POOL" \
+        --dns-nameserver "$DNS_NAMESERVER" \
         "${prefix}-subnet"
 
     # Get network UUID for OVN configuration
@@ -602,6 +603,38 @@ create_vms_on_networks() {
         FIP_ADDR=$(echo "$FIP_RESULT" | jq -r '.floating_ip_address')
         CREATED_FIPS+=("$FIP_ID")
         echo "Assigned floating IP: $FIP_ADDR"
+
+        # Create provider-network (external) instance
+        if [[ "$TEST_MODE" == "workload" ]]; then
+            EXT_NAME="load-ext-${NET_ID}-iter${ITERATION}"
+            EXT_PORT="load-ext-port-${NET_ID}-iter${ITERATION}"
+        else
+            local ext_suffix="${NET_ID#load-net-}"
+            EXT_NAME="load-ext-${ext_suffix}"
+            EXT_PORT="load-ext-port-${ext_suffix}"
+        fi
+
+        echo "Creating port on external network: $EXT_PORT"
+        if ! openstack port create \
+            --network "$EXTERNAL_NET" \
+            "$EXT_PORT" -f value -c id >/dev/null; then
+            echo "ERROR: Failed to create port on $EXTERNAL_NET"
+            return 1
+        fi
+        CREATED_PORTS+=("$EXT_PORT")
+
+        echo "Creating provider-network instance: $EXT_NAME"
+        if ! openstack server create \
+            --image "$IMAGE" \
+            --flavor "$FLAVOR" \
+            --key-name "$KEYPAIR" \
+            --port "$EXT_PORT" \
+            --user-data "$USERDATA_FILE" \
+            "$EXT_NAME" -f value -c id >/dev/null; then
+            echo "ERROR: Failed to create provider-network instance on $EXTERNAL_NET"
+            return 1
+        fi
+        CREATED_SERVERS+=("$EXT_NAME")
     done
 }
 
@@ -619,12 +652,14 @@ collect_failed_vms() {
         if [[ "$TEST_MODE" == "workload" ]]; then
             local snat_name="load-snat-${NET_ID}-iter${ITERATION}"
             local fip_name="load-fip-${NET_ID}-iter${ITERATION}"
+            local ext_name="load-ext-${NET_ID}-iter${ITERATION}"
         else
             local suffix="${NET_ID#load-net-}"
             local snat_name="load-snat-${suffix}"
             local fip_name="load-fip-${suffix}"
+            local ext_name="load-ext-${suffix}"
         fi
-        for expected_name in "$snat_name" "$fip_name"; do
+        for expected_name in "$snat_name" "$fip_name" "$ext_name"; do
             if [[ -n "$RESPONSE" ]] && ! echo "$RESPONSE" | jq -e ".instances[] | select(.hostname == \"$expected_name\")" >/dev/null 2>&1; then
                 _failed_vms+=("$expected_name (no heartbeat)")
             fi
@@ -724,7 +759,7 @@ run_iteration() {
     fi
 
     # Validate ephemeral load test instances via dashboard
-    EXPECTED_INSTANCES=$((NUM_NETWORKS * 2))
+    EXPECTED_INSTANCES=$((NUM_NETWORKS * 3))
     if ! validate_ephemeral_instances "$EXPECTED_INSTANCES"; then
         echo ""
         echo "!!! TEST FAILED: Ephemeral instance validation failed !!!"
@@ -753,7 +788,7 @@ echo ""
 echo "Configuration:"
 echo "  Test mode: $TEST_MODE"
 echo "  Networks per iteration: $NUM_NETWORKS"
-echo "  Instances per iteration: $((NUM_NETWORKS * 2))"
+echo "  Instances per iteration: $((NUM_NETWORKS * 3))"
 echo "  Wait time: ${WAIT_TIME}s"
 echo "  Ephemeral stale threshold: ${EPHEMERAL_STALE_THRESHOLD}s"
 echo "  Dashboard API: $DASHBOARD_API_URL"

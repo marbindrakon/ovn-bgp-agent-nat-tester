@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OVN NAT Test Dashboard</title>
-    <meta http-equiv="refresh" content="30">
+    <meta http-equiv="refresh" content="15">
     <style>
         * {
             box-sizing: border-box;
@@ -182,26 +182,10 @@
             text-transform: uppercase;
         }
 
-        .lt-badge-idle {
-            background: #55555530;
-            color: #888;
-        }
-
-        .lt-badge-running {
-            background: #00ff8820;
-            color: #00ff88;
-            animation: pulse 1.5s infinite;
-        }
-
-        .lt-badge-completed {
-            background: #00d4ff20;
-            color: #00d4ff;
-        }
-
-        .lt-badge-failed {
-            background: #ff475720;
-            color: #ff4757;
-        }
+        .lt-badge-idle     { background: #55555530; color: #888; }
+        .lt-badge-running  { background: #00ff8820; color: #00ff88; animation: pulse 1.5s infinite; }
+        .lt-badge-completed { background: #00d4ff20; color: #00d4ff; }
+        .lt-badge-failed   { background: #ff475720; color: #ff4757; }
 
         .lt-desc {
             color: #777;
@@ -254,22 +238,9 @@
             margin-bottom: 6px;
         }
 
-        .lt-failed-vms ul {
-            list-style: none;
-            padding: 0;
-        }
-
-        .lt-failed-vms li {
-            padding: 3px 0;
-            font-family: monospace;
-            color: #ff8888;
-            font-size: 0.9em;
-        }
-
-        .lt-failed-vms li::before {
-            content: "\2717  ";
-            color: #ff4757;
-        }
+        .lt-failed-vms ul { list-style: none; padding: 0; }
+        .lt-failed-vms li { padding: 3px 0; font-family: monospace; color: #ff8888; font-size: 0.9em; }
+        .lt-failed-vms li::before { content: "\2717  "; color: #ff4757; }
 
         /* Table */
         table {
@@ -281,7 +252,7 @@
         }
 
         th, td {
-            padding: 15px;
+            padding: 12px 15px;
             text-align: left;
         }
 
@@ -290,56 +261,31 @@
             color: #00d4ff;
             font-weight: 600;
             text-transform: uppercase;
-            font-size: 0.85em;
+            font-size: 0.8em;
         }
 
-        tr:nth-child(even) {
-            background: #1a1a3e;
+        tbody tr {
+            cursor: pointer;
         }
 
-        tr:hover {
-            background: #252550;
-        }
-
-        tr.stale {
-            background: #3d1a1a !important;
-        }
-
-        tr.stale:hover {
-            background: #4d2020 !important;
-        }
-
-        tr.warning {
-            background: #3d3a1a !important;
-        }
-
-        tr.warning:hover {
-            background: #4d4a20 !important;
-        }
+        tr:nth-child(even) { background: #1a1a3e; }
+        tr:hover { background: #252550; }
+        tr.stale { background: #3d1a1a !important; }
+        tr.stale:hover { background: #4d2020 !important; }
+        tr.warning { background: #3d3a1a !important; }
+        tr.warning:hover { background: #4d4a20 !important; }
 
         .status-badge {
             display: inline-block;
-            padding: 5px 12px;
+            padding: 4px 10px;
             border-radius: 20px;
-            font-size: 0.85em;
+            font-size: 0.82em;
             font-weight: 600;
         }
 
-        .status-healthy {
-            background: #00ff8820;
-            color: #00ff88;
-        }
-
-        .status-stale {
-            background: #ff475720;
-            color: #ff4757;
-            animation: pulse 1.5s infinite;
-        }
-
-        .status-warning {
-            background: #f59e0b20;
-            color: #fbbf24;
-        }
+        .status-healthy { background: #00ff8820; color: #00ff88; }
+        .status-stale   { background: #ff475720; color: #ff4757; animation: pulse 1.5s infinite; }
+        .status-warning { background: #f59e0b20; color: #fbbf24; }
 
         @keyframes pulse {
             0%, 100% { opacity: 1; }
@@ -362,22 +308,26 @@
             font-size: 0.9em;
         }
 
-        .vm-type-snat {
-            background: #7c3aed20;
-            color: #a78bfa;
-        }
+        .vm-type-snat { background: #7c3aed20; color: #a78bfa; }
+        .vm-type-fip  { background: #f59e0b20; color: #fbbf24; }
+        .vm-type-ext  { background: #06b6d420; color: #67e8f9; }
 
-        .vm-type-fip {
-            background: #f59e0b20;
-            color: #fbbf24;
-        }
+        .ip-muted { color: #666; font-size: 0.9em; }
 
-        .ip-muted {
-            color: #666;
-        }
+        .ts-muted { color: #777; font-size: 0.82em; }
 
-        .last-seen-warning {
-            color: #fbbf24;
+        .last-seen-warning { color: #fbbf24; }
+
+        .fail-badge {
+            display: inline-block;
+            margin-left: 6px;
+            padding: 1px 6px;
+            border-radius: 10px;
+            background: #ff475720;
+            color: #ff8888;
+            font-size: 0.75em;
+            font-weight: 600;
+            vertical-align: middle;
         }
 
         /* Test history */
@@ -395,57 +345,16 @@
             color: #888;
         }
 
-        .history-table {
-            width: 100%;
-            border-collapse: collapse;
-            background: transparent;
-        }
+        .history-table { width: 100%; border-collapse: collapse; background: transparent; }
+        .history-table th { background: #0f1a2e; color: #888; font-size: 0.75em; padding: 8px 12px; }
+        .history-table td { padding: 8px 12px; font-size: 0.85em; color: #aaa; border-bottom: 1px solid #0f1a2e; }
+        .history-table tr:last-child td { border-bottom: none; }
+        .history-table tr:hover { background: #1a2a3e; }
 
-        .history-table th {
-            background: #0f1a2e;
-            color: #888;
-            font-size: 0.75em;
-            padding: 8px 12px;
-        }
-
-        .history-table td {
-            padding: 8px 12px;
-            font-size: 0.85em;
-            color: #aaa;
-            border-bottom: 1px solid #0f1a2e;
-        }
-
-        .history-table tr:last-child td {
-            border-bottom: none;
-        }
-
-        .history-table tr:hover {
-            background: #1a2a3e;
-        }
-
-        .hist-badge {
-            display: inline-block;
-            padding: 2px 8px;
-            border-radius: 10px;
-            font-size: 0.8em;
-            font-weight: 600;
-            text-transform: uppercase;
-        }
-
-        .hist-badge-completed {
-            background: #00d4ff20;
-            color: #00d4ff;
-        }
-
-        .hist-badge-failed {
-            background: #ff475720;
-            color: #ff4757;
-        }
-
-        .hist-badge-cancelled {
-            background: #f59e0b20;
-            color: #fbbf24;
-        }
+        .hist-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.8em; font-weight: 600; text-transform: uppercase; }
+        .hist-badge-completed { background: #00d4ff20; color: #00d4ff; }
+        .hist-badge-failed    { background: #ff475720; color: #ff4757; }
+        .hist-badge-cancelled { background: #f59e0b20; color: #fbbf24; }
 
         .no-instances {
             text-align: center;
@@ -461,6 +370,75 @@
             font-size: 0.85em;
         }
 
+        /* Instance detail modal */
+        dialog.instance-modal {
+            background: #1a1a2e;
+            color: #eee;
+            border: 1px solid #0f3460;
+            border-radius: 12px;
+            padding: 0;
+            min-width: 520px;
+            max-width: 720px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+
+        dialog.instance-modal::backdrop {
+            background: rgba(0, 0, 0, 0.72);
+        }
+
+        .modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 20px 24px 0;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            color: #666;
+            font-size: 1.6em;
+            cursor: pointer;
+            line-height: 1;
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+
+        .modal-close:hover { color: #eee; background: #252550; }
+
+        .modal-inner { padding: 16px 24px 24px; }
+
+        .modal-meta-grid {
+            display: grid;
+            grid-template-columns: max-content 1fr;
+            gap: 6px 16px;
+            margin-bottom: 20px;
+            font-size: 0.88em;
+        }
+
+        .mm-label { color: #777; text-align: right; white-space: nowrap; }
+        .mm-val   { color: #ddd; }
+        .mm-val code { font-size: 0.92em; color: #aaa; }
+
+        .modal-section-title {
+            font-size: 0.8em;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.07em;
+            color: #666;
+            border-top: 1px solid #0f3460;
+            padding-top: 14px;
+            margin-bottom: 12px;
+        }
+
+        .failure-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+        .failure-table th { background: #0f1a2e; color: #777; padding: 7px 12px; text-align: left; font-weight: 600; font-size: 0.8em; text-transform: uppercase; }
+        .failure-table td { padding: 7px 12px; border-bottom: 1px solid #0f1a2e; color: #ccc; }
+        .failure-table td:first-child { color: #888; white-space: nowrap; font-size: 0.9em; }
+        .failure-table td:last-child { color: #ff9999; font-family: monospace; word-break: break-word; }
+        .failure-table tr:last-child td { border-bottom: none; }
     </style>
 </head>
 <body>
@@ -501,19 +479,10 @@
             <div class="summary-group-label">Baseline Instances</div>
             <div class="summary-group-desc">Always-on VMs that validate steady-state routing</div>
             <div class="summary-group-cards">
-                <div class="summary-card total">
-                    <div class="number">{{ perm_total }}</div>
-                    <div class="label">Total</div>
-                </div>
-                <div class="summary-card healthy">
-                    <div class="number">{{ perm_healthy }}</div>
-                    <div class="label">Healthy</div>
-                </div>
+                <div class="summary-card total"><div class="number">{{ perm_total }}</div><div class="label">Total</div></div>
+                <div class="summary-card healthy"><div class="number">{{ perm_healthy }}</div><div class="label">Healthy</div></div>
                 {% if perm_stale > 0 %}
-                <div class="summary-card stale">
-                    <div class="number">{{ perm_stale }}</div>
-                    <div class="label">Unresponsive</div>
-                </div>
+                <div class="summary-card stale"><div class="number">{{ perm_stale }}</div><div class="label">Unresponsive</div></div>
                 {% endif %}
             </div>
         </div>
@@ -521,19 +490,10 @@
             <div class="summary-group-label">Load Test Instances</div>
             <div class="summary-group-desc">Short-lived VMs created during load tests</div>
             <div class="summary-group-cards">
-                <div class="summary-card total">
-                    <div class="number">{{ eph_total }}</div>
-                    <div class="label">Total</div>
-                </div>
-                <div class="summary-card healthy">
-                    <div class="number">{{ eph_healthy }}</div>
-                    <div class="label">Healthy</div>
-                </div>
+                <div class="summary-card total"><div class="number">{{ eph_total }}</div><div class="label">Total</div></div>
+                <div class="summary-card healthy"><div class="number">{{ eph_healthy }}</div><div class="label">Healthy</div></div>
                 {% if eph_stale > 0 %}
-                <div class="summary-card stale">
-                    <div class="number">{{ eph_stale }}</div>
-                    <div class="label">Unresponsive</div>
-                </div>
+                <div class="summary-card stale"><div class="number">{{ eph_stale }}</div><div class="label">Unresponsive</div></div>
                 {% endif %}
             </div>
         </div>
@@ -626,23 +586,17 @@
                     <td>
                         {% if run.elapsed_seconds %}
                             {{ (run.elapsed_seconds // 3600) }}h {{ '%02d' | format((run.elapsed_seconds % 3600) // 60) }}m
-                        {% else %}
-                            —
-                        {% endif %}
+                        {% else %}—{% endif %}
                     </td>
                     <td>
                         {% if run.finished_at %}
                             {{ run.finished_at[:16] | replace('T', ' ') }} UTC
-                        {% else %}
-                            —
-                        {% endif %}
+                        {% else %}—{% endif %}
                     </td>
                     <td>
                         {% if run.failed_vms %}
                             <span style="color: #ff4757;">{{ run.failed_vms | length }}</span>
-                        {% else %}
-                            0
-                        {% endif %}
+                        {% else %}0{% endif %}
                     </td>
                 </tr>
                 {% endfor %}
@@ -657,16 +611,19 @@
         <thead>
             <tr>
                 <th>Status</th>
-                <th>Availability Zone</th>
-                <th>VM Type</th>
+                <th>AZ</th>
+                <th>Type</th>
                 <th>Hostname</th>
                 <th>IP Address</th>
+                <th>First Seen</th>
                 <th>Last Seen</th>
+                <th>Failures</th>
             </tr>
         </thead>
         <tbody>
             {% for instance in instances %}
-            <tr class="{{ 'stale' if instance.is_stale else ('warning' if instance.is_warning else '') }}">
+            <tr class="{{ 'stale' if instance.is_stale else ('warning' if instance.is_warning else '') }}"
+                data-instance-id="{{ instance.instance_id }}">
                 <td>
                     {% if instance.is_stale %}
                     <span class="status-badge status-stale">UNRESPONSIVE</span>
@@ -677,12 +634,18 @@
                     {% endif %}
                 </td>
                 <td><span class="az-badge">{{ instance.availability_zone }}</span></td>
-                <td>
-                    <span class="vm-type vm-type-{{ instance.vm_type }}">{{ instance.vm_type | upper }}</span>
-                </td>
+                <td><span class="vm-type vm-type-{{ instance.vm_type }}">{{ instance.vm_type | upper }}</span></td>
                 <td>{{ instance.hostname }}</td>
                 <td class="ip-muted">{{ instance.ip_address }}</td>
+                <td class="ts-muted">{{ instance.first_seen[:16] | replace('T', ' ') }} UTC</td>
                 <td class="{{ 'last-seen-warning' if instance.is_warning else '' }}">{{ instance.seconds_ago }}s ago</td>
+                <td>
+                    {% if instance.failure_count > 0 %}
+                    <span class="fail-badge">{{ instance.failure_count }}</span>
+                    {% else %}
+                    <span style="color:#444">0</span>
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>
@@ -694,8 +657,88 @@
     {% endif %}
 
     <div class="last-updated">
-        Page auto-refreshes every 30 seconds
+        Page auto-refreshes every 15 seconds &mdash; click any row for details
     </div>
 
+    {# --- Instance detail modal --- #}
+    <dialog id="instanceModal" class="instance-modal">
+        <div class="modal-header">
+            <span></span>
+            <button class="modal-close" id="modalClose">&times;</button>
+        </div>
+        <div id="modal-content"></div>
+    </dialog>
+
+    <script>
+        function escHtml(str) {
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        function fmtTs(ts) {
+            return ts ? ts.replace('T', ' ').slice(0, 19) + ' UTC' : '—';
+        }
+
+        const modal = document.getElementById('instanceModal');
+
+        document.getElementById('modalClose').addEventListener('click', () => modal.close());
+
+        // Close on backdrop click
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) modal.close();
+        });
+
+        document.querySelectorAll('tbody tr[data-instance-id]').forEach(row => {
+            row.addEventListener('click', async () => {
+                const id = row.dataset.instanceId;
+                const content = document.getElementById('modal-content');
+
+                content.innerHTML = '<div style="text-align:center;padding:30px;color:#666">Loading&hellip;</div>';
+                modal.showModal();
+
+                try {
+                    const resp = await fetch('/api/instances/' + encodeURIComponent(id));
+                    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                    const d = await resp.json();
+
+                    const fc = d.failure_count || 0;
+                    const rf = d.recent_failures || [];
+
+                    let html = '<div class="modal-inner">';
+                    html += '<h3 style="color:#00d4ff;margin-bottom:16px">' + escHtml(d.hostname) + '</h3>';
+                    html += '<div class="modal-meta-grid">';
+                    html += '<span class="mm-label">Instance ID</span><span class="mm-val"><code>' + escHtml(d.instance_id) + '</code></span>';
+                    html += '<span class="mm-label">IP Address</span><span class="mm-val">' + escHtml(d.ip_address) + '</span>';
+                    html += '<span class="mm-label">AZ</span><span class="mm-val">' + escHtml(d.availability_zone) + '</span>';
+                    html += '<span class="mm-label">VM Type</span><span class="mm-val">' + escHtml(d.vm_type) + '</span>';
+                    html += '<span class="mm-label">First Seen</span><span class="mm-val">' + fmtTs(d.first_seen) + '</span>';
+                    html += '<span class="mm-label">Last Seen</span><span class="mm-val">' + fmtTs(d.last_seen) + ' (' + d.seconds_ago + 's ago)</span>';
+                    html += '</div>';
+
+                    const fcColor = fc > 0 ? '#ff4757' : '#00ff88';
+                    html += '<div class="modal-section-title">Failures since agent start: <span style="color:' + fcColor + '">' + fc + '</span></div>';
+
+                    if (rf.length === 0) {
+                        html += '<div style="color:#666;padding:6px 0;font-size:0.88em">No failure details recorded.</div>';
+                    } else {
+                        html += '<table class="failure-table"><thead><tr><th>Timestamp (UTC)</th><th>Reason</th></tr></thead><tbody>';
+                        // Most recent first
+                        for (const f of [...rf].reverse()) {
+                            html += '<tr><td>' + escHtml(f.timestamp.replace('T', ' ').slice(0, 19)) + '</td><td>' + escHtml(f.reason) + '</td></tr>';
+                        }
+                        html += '</tbody></table>';
+                    }
+
+                    html += '</div>';
+                    content.innerHTML = html;
+                } catch (e) {
+                    content.innerHTML = '<div class="modal-inner" style="color:#ff4757">Failed to load: ' + escHtml(e.message) + '</div>';
+                }
+            });
+        });
+    </script>
 </body>
 </html>

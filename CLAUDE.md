@@ -37,8 +37,8 @@ This convention is used in the dashboard (`app.py`), cleanup scripts, and load t
 - Private networks: `load-net-iter{iteration}-{index}-private`
 - Private subnets: `load-net-iter{iteration}-{index}-private-v4`
 - Routers: `load-router-iter{iteration}-{index}`
-- Servers: `load-snat-iter{iteration}-{index}`, `load-fip-iter{iteration}-{index}`
-- Ports: `load-fip-port-iter{iteration}-{index}`
+- Servers: `load-snat-iter{iteration}-{index}`, `load-fip-iter{iteration}-{index}`, `load-ext-iter{iteration}-{index}`
+- Ports: `load-fip-port-iter{iteration}-{index}`, `load-ext-port-iter{iteration}-{index}`
 
 ## Gotchas and Unintuitive Behaviors
 

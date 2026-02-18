@@ -206,6 +206,20 @@ cleanup_networks
 echo "=== Load Test Resource Cleanup Complete ==="
 echo ""
 
+# Clear load-* instances from the dashboard
+DASHBOARD_URL="${DASHBOARD_URL:-https://snat-heartbeat.apps.lab-hub.lab.signal9.gg}"
+if [[ -n "${DASHBOARD_API_KEY:-}" ]]; then
+    echo "Clearing load-* instances from dashboard..."
+    result=$(curl -s -k -X DELETE \
+        -H "X-API-Key: ${DASHBOARD_API_KEY}" \
+        "${DASHBOARD_URL}/api/instances?hostname_prefix=load-" 2>/dev/null) || true
+    count=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('removed_count',0))" 2>/dev/null || echo "?")
+    echo "Removed $count instances from dashboard"
+else
+    echo "DASHBOARD_API_KEY not set — skipping dashboard cleanup"
+fi
+echo ""
+
 # Show remaining load test resources (if any)
 REMAINING_SERVERS=$(openstack server list -f value -c Name 2>/dev/null | grep -c '^load-' || true)
 REMAINING_PORTS=$(openstack port list -f value -c Name 2>/dev/null | grep -c '^load-' || true)
