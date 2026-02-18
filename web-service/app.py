@@ -6,8 +6,11 @@ Instances are never automatically removed; use the cleanup scripts or
 DELETE /api/instances?hostname_prefix=... to remove them explicitly.
 """
 
+import fcntl
 import json
 import os
+import tempfile
+from contextlib import contextmanager
 from functools import wraps
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template
@@ -38,7 +41,19 @@ MAX_FIELD_LENGTHS = {
 STATE_FILE = os.environ.get('STATE_FILE', '/tmp/heartbeat-state.json')
 LOAD_TEST_STATUS_FILE = os.environ.get('LOAD_TEST_STATUS_FILE', '/tmp/load-test-status.json')
 LOAD_TEST_HISTORY_FILE = os.environ.get('LOAD_TEST_HISTORY_FILE', '/tmp/load-test-history.json')
+STATE_LOCK_FILE = os.environ.get('STATE_LOCK_FILE', '/tmp/heartbeat-state.lock')
 MAX_HISTORY_ENTRIES = 5
+
+
+@contextmanager
+def _state_lock():
+    """Exclusive file lock to serialize all state mutations across gunicorn workers."""
+    with open(STATE_LOCK_FILE, 'w') as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def require_api_key(f):
@@ -104,8 +119,17 @@ def load_state():
     return instances
 
 
+def _atomic_write(path, data):
+    """Write JSON to a temp file then rename into place (atomic on Linux)."""
+    dir_name = os.path.dirname(os.path.abspath(path))
+    with tempfile.NamedTemporaryFile('w', dir=dir_name, delete=False, suffix='.tmp') as f:
+        json.dump(data, f, indent=2)
+        tmp_path = f.name
+    os.replace(tmp_path, path)
+
+
 def save_state(instances):
-    """Save state to JSON file."""
+    """Save state to JSON file atomically."""
     try:
         data = {}
         for instance_id, instance_data in instances.items():
@@ -114,8 +138,7 @@ def save_state(instances):
                 'last_seen': instance_data['last_seen'].isoformat(),
                 'first_seen': instance_data['first_seen'].isoformat(),
             }
-        with open(STATE_FILE, 'w') as f:
-            json.dump(data, f, indent=2)
+        _atomic_write(STATE_FILE, data)
     except IOError as e:
         app.logger.error(f"Failed to save state file: {e}")
 
@@ -156,31 +179,32 @@ def heartbeat():
 
     instance_id = truncate_field(instance_id, 'instance_id')
 
-    instances = load_state()
-
-    if instance_id not in instances and len(instances) >= MAX_INSTANCES:
-        return jsonify({'error': 'instance limit reached'}), 429
-
     now = datetime.utcnow()
     hostname = truncate_field(data.get('hostname', 'unknown'), 'hostname')
     instance_type = get_instance_type(hostname)
 
-    existing = instances.get(instance_id, {})
+    with _state_lock():
+        instances = load_state()
 
-    instances[instance_id] = {
-        'instance_id': instance_id,
-        'hostname': hostname,
-        'ip_address': truncate_field(data.get('ip_address', request.remote_addr), 'ip_address'),
-        'availability_zone': truncate_field(data.get('availability_zone', 'unknown'), 'availability_zone'),
-        'vm_type': truncate_field(data.get('vm_type', 'unknown'), 'vm_type'),
-        'instance_type': instance_type,
-        'last_seen': now,
-        'first_seen': existing.get('first_seen', now),
-        'failure_count': int(data['failure_count']) if isinstance(data.get('failure_count'), (int, float)) else 0,
-        'recent_failures': sanitize_recent_failures(data.get('recent_failures', [])),
-    }
+        if instance_id not in instances and len(instances) >= MAX_INSTANCES:
+            return jsonify({'error': 'instance limit reached'}), 429
 
-    save_state(instances)
+        existing = instances.get(instance_id, {})
+
+        instances[instance_id] = {
+            'instance_id': instance_id,
+            'hostname': hostname,
+            'ip_address': truncate_field(data.get('ip_address', request.remote_addr), 'ip_address'),
+            'availability_zone': truncate_field(data.get('availability_zone', 'unknown'), 'availability_zone'),
+            'vm_type': truncate_field(data.get('vm_type', 'unknown'), 'vm_type'),
+            'instance_type': instance_type,
+            'last_seen': now,
+            'first_seen': existing.get('first_seen', now),
+            'failure_count': int(data['failure_count']) if isinstance(data.get('failure_count'), (int, float)) else 0,
+            'recent_failures': sanitize_recent_failures(data.get('recent_failures', [])),
+        }
+
+        save_state(instances)
 
     return jsonify({'status': 'ok', 'timestamp': now.isoformat()}), 200
 
@@ -247,8 +271,9 @@ def dashboard():
 def clear_state():
     """Clear all heartbeat state."""
     try:
-        if os.path.exists(STATE_FILE):
-            os.remove(STATE_FILE)
+        with _state_lock():
+            if os.path.exists(STATE_FILE):
+                os.remove(STATE_FILE)
         app.logger.info("State cleared manually")
         return jsonify({'status': 'cleared'}), 200
     except IOError as e:
@@ -268,16 +293,18 @@ def delete_instances():
     if not hostname_prefix:
         return jsonify({'error': 'hostname_prefix query parameter required'}), 400
 
-    instances = load_state()
-    removed = []
-    kept = {}
-    for instance_id, data in instances.items():
-        if data.get('hostname', '').startswith(hostname_prefix):
-            removed.append(data.get('hostname', instance_id))
-        else:
-            kept[instance_id] = data
+    with _state_lock():
+        instances = load_state()
+        removed = []
+        kept = {}
+        for instance_id, data in instances.items():
+            if data.get('hostname', '').startswith(hostname_prefix):
+                removed.append(data.get('hostname', instance_id))
+            else:
+                kept[instance_id] = data
 
-    save_state(kept)
+        save_state(kept)
+
     app.logger.info(f"Removed {len(removed)} instances matching prefix '{hostname_prefix}': {removed}")
     return jsonify({'status': 'ok', 'removed_count': len(removed), 'removed': removed}), 200
 
@@ -354,11 +381,10 @@ def load_test_status():
 
 
 def save_test_status(data):
-    """Save load test status to file."""
+    """Save load test status to file atomically."""
     try:
         data['updated_at'] = datetime.utcnow().isoformat()
-        with open(LOAD_TEST_STATUS_FILE, 'w') as f:
-            json.dump(data, f, indent=2)
+        _atomic_write(LOAD_TEST_STATUS_FILE, data)
     except IOError as e:
         app.logger.error(f"Failed to save load test status: {e}")
 
@@ -380,8 +406,7 @@ def save_to_test_history(entry):
     history.insert(0, entry)
     history = history[:MAX_HISTORY_ENTRIES]
     try:
-        with open(LOAD_TEST_HISTORY_FILE, 'w') as f:
-            json.dump(history, f, indent=2)
+        _atomic_write(LOAD_TEST_HISTORY_FILE, history)
     except IOError as e:
         app.logger.error(f"Failed to save test history: {e}")
 
@@ -401,55 +426,56 @@ def update_load_test_status():
     if status not in ('running', 'completed', 'failed', 'idle'):
         return jsonify({'error': 'status must be running, completed, failed, or idle'}), 400
 
-    current = load_test_status()
-    previous_status = current.get('status')
+    with _state_lock():
+        current = load_test_status()
+        previous_status = current.get('status')
 
-    current['status'] = status
-    if 'iteration' in data:
-        current['iteration'] = data['iteration']
-    if 'max_iterations' in data:
-        current['max_iterations'] = data['max_iterations']
-    if 'phase' in data:
-        current['phase'] = data['phase']
-    if 'test_mode' in data:
-        current['test_mode'] = data['test_mode']
+        current['status'] = status
+        if 'iteration' in data:
+            current['iteration'] = data['iteration']
+        if 'max_iterations' in data:
+            current['max_iterations'] = data['max_iterations']
+        if 'phase' in data:
+            current['phase'] = data['phase']
+        if 'test_mode' in data:
+            current['test_mode'] = data['test_mode']
 
-    history_status = None
-    if status in ('completed', 'failed'):
-        history_status = status
-    elif status == 'idle' and previous_status == 'running':
-        history_status = 'cancelled'
+        history_status = None
+        if status in ('completed', 'failed'):
+            history_status = status
+        elif status == 'idle' and previous_status == 'running':
+            history_status = 'cancelled'
 
-    if history_status:
-        elapsed = 0
-        if current.get('started_at'):
-            start = datetime.fromisoformat(current['started_at'])
-            elapsed = int((datetime.utcnow() - start).total_seconds())
-        save_to_test_history({
-            'status': history_status,
-            'test_mode': current.get('test_mode', ''),
-            'iteration': current.get('iteration', 0),
-            'max_iterations': current.get('max_iterations', 0),
-            'started_at': current.get('started_at', ''),
-            'finished_at': datetime.utcnow().isoformat(),
-            'elapsed_seconds': elapsed,
-            'failed_vms': current.get('failed_vms', []),
-            'phase': current.get('phase', ''),
-        })
+        if history_status:
+            elapsed = 0
+            if current.get('started_at'):
+                start = datetime.fromisoformat(current['started_at'])
+                elapsed = int((datetime.utcnow() - start).total_seconds())
+            save_to_test_history({
+                'status': history_status,
+                'test_mode': current.get('test_mode', ''),
+                'iteration': current.get('iteration', 0),
+                'max_iterations': current.get('max_iterations', 0),
+                'started_at': current.get('started_at', ''),
+                'finished_at': datetime.utcnow().isoformat(),
+                'elapsed_seconds': elapsed,
+                'failed_vms': current.get('failed_vms', []),
+                'phase': current.get('phase', ''),
+            })
 
-    if status == 'running':
-        if previous_status != 'running':
-            current['started_at'] = datetime.utcnow().isoformat()
-        current['failed_vms'] = []
-    elif status == 'failed':
-        current['failed_vms'] = data.get('failed_vms', [])
-    elif status == 'idle':
-        current['started_at'] = None
-        current['failed_vms'] = []
-        current['phase'] = ''
-        current['test_mode'] = ''
+        if status == 'running':
+            if previous_status != 'running':
+                current['started_at'] = datetime.utcnow().isoformat()
+            current['failed_vms'] = []
+        elif status == 'failed':
+            current['failed_vms'] = data.get('failed_vms', [])
+        elif status == 'idle':
+            current['started_at'] = None
+            current['failed_vms'] = []
+            current['phase'] = ''
+            current['test_mode'] = ''
 
-    save_test_status(current)
+        save_test_status(current)
 
     return jsonify({'status': 'ok'}), 200
 

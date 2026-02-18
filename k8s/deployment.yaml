@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: dashboard
-          image: quay.signal9.gg/aaustin/snat-test-dashboard@sha256:87457f1d4a6d83ddc7ff2b0aade1f6d60d17569f09de1c4e7ab457aef154065f
+          image: quay.signal9.gg/aaustin/snat-test-dashboard@sha256:5f4be1ebf5a123751d179f45a93122955cc5f6f1cced6b06cd4ff7803d4009c1
           ports:
             - containerPort: 8080
               protocol: TCP
@@ -30,6 +30,8 @@ spec:
               value: "/data/load-test-status.json"
             - name: LOAD_TEST_HISTORY_FILE
               value: "/data/load-test-history.json"
+            - name: STATE_LOCK_FILE
+              value: "/data/heartbeat-state.lock"
             - name: API_KEY
               valueFrom:
                 secretKeyRef:
