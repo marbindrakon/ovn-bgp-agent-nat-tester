@@ -1,0 +1,74 @@
+---
+# Remediate NetworkManager ownership of OVN BGP agent EVPN interfaces
+#
+# Problem: NM can lose the external=true metadata on br-<vni>/vxlan-<vni>
+# connections and take full ownership. On the next link bounce NM re-creates
+# the bridge without enslaving it to the VRF, silently breaking inbound FIP
+# traffic while outbound continues working (stale nexthop cache).
+#
+# This playbook:
+#   1. Deploys the NM drop-in that permanently marks these interfaces unmanaged
+#   2. Stops ovn-bgp-agent so no traffic is disrupted mid-cleanup
+#   3. Deletes stale NM connection profiles for the guarded interfaces
+#   4. Starts ovn-bgp-agent; it recreates the interfaces cleanly outside NM
+#
+# Usage:
+#   ansible-playbook -i ansible-inventory -u cloud-admin --key-file ~/oso-ssh \
+#     remediate-evpn-nm-ownership.yml
+#
+#   # Limit to a single node:
+#   ansible-playbook -i ansible-inventory -u cloud-admin --key-file ~/oso-ssh \
+#     -l 172.18.158.7 remediate-evpn-nm-ownership.yml
+#
+#   # Override the connection list:
+#   ansible-playbook ... -e '{"nm_guarded_connections": ["br-100","vxlan-100"]}'
+
+- name: Remediate NM ownership of OVN BGP agent EVPN interfaces
+  hosts: all
+  become: true
+
+  vars:
+    nm_config_src: nm-config/99-ovn-bgp-agent-unmanaged.conf
+    nm_config_dest: /etc/NetworkManager/conf.d/99-ovn-bgp-agent-unmanaged.conf
+    nm_guarded_connections:
+      - br-100
+      - vrf-100
+      - vxlan-100
+
+  tasks:
+
+    - name: Deploy NM drop-in (mark EVPN interfaces as unmanaged)
+      copy:
+        src: "{{ nm_config_src }}"
+        dest: "{{ nm_config_dest }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Reload NM config
+      command: nmcli general reload conf
+      changed_when: true
+
+    - name: Stop ovn-bgp-agent
+      systemd:
+        name: edpm_ovn_bgp_agent
+        state: stopped
+
+    - name: Delete stale NM connection profiles
+      command: nmcli --terse connection delete "{{ item }}"
+      loop: "{{ nm_guarded_connections }}"
+      register: _nm_delete
+      # rc=10 means the connection was not found — that is fine
+      failed_when: _nm_delete.rc != 0 and _nm_delete.rc != 10
+      changed_when: _nm_delete.rc == 0
+
+    - name: Start ovn-bgp-agent
+      systemd:
+        name: edpm_ovn_bgp_agent
+        state: started
+
+    - name: Verify ovn-bgp-agent is running
+      systemd:
+        name: edpm_ovn_bgp_agent
+      register: _agent_status
+      failed_when: _agent_status.status.ActiveState != "active"
